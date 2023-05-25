@@ -1,157 +1,69 @@
 #include <iostream>
-#include <string>
-#include <opencv2/core.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
+#include <vector>
+#include <random>
 
 using namespace std;
-using namespace cv;
 
-Mat gen_obstacle(Mat tmpmap, Mat map, int obstacle_wide, int car_wide, int safe_distance, int obstacle_num_max) {
-    int obstacle_num = 0;
-    vector<int> row;
-    vector<int> col;
-    findNonZero(tmpmap == 0, row, col);
-    while (obstacle_num < obstacle_num_max) {
-        int idx = rand() % row.size();
-        if (col[idx] < 100)//²»ÄÜÉú³ÉÔÚ³õÊ¼Î»ÖÃ
-            continue;
-        int safe_wide = obstacle_wide + car_wide + safe_distance;
-        bool have_at_least_one_neigb_occ = false;//ÓĞÒ»¸ö±»Õ¼¾İËµÃ÷²»°²È«£¬ÎŞ·¨Éú³É
-        for (int l = row[idx] - safe_wide; l <= row[idx] + safe_wide; ++l) {
-            if (l >= 600 || l < 0)
-                continue;
-            for (int m = col[idx] - safe_wide; m <= col[idx] + safe_wide; ++m) {
-                if (m >= 1200 || m < 0)
-                    continue;
-                int this_neighbor_occ = tmpmap.at<uchar>(l, m);
-                if (this_neighbor_occ == 1) {
-                    have_at_least_one_neigb_occ = true;
-                    break;
-                }
-            }
-            if (have_at_least_one_neigb_occ)
-                break;
-        }
-        if (!have_at_least_one_neigb_occ) {
-            for (int l = row[idx] - obstacle_wide; l <= row[idx] + obstacle_wide; ++l) {
-                if (l >= 600 || l < 0)
-                    continue;
-                for (int m = col[idx] - obstacle_wide; m <= col[idx] + obstacle_wide; ++m) {
-                    if (m >= 1200 || m < 0)
-                        continue;
-                    map.at<uchar>(l, m) = 1;
-                }
-            }
-            obstacle_num += 1;
-            findNonZero(map == 0, row, col);
-        }
-    }
-    return map;
-}
+// å®šä¹‰äºŒç»´åæ ‡ç‚¹ç»“æ„ä½“
+struct Point {
+    int x;
+    int y;
 
-Mat expand_race_track(Mat map, int index) {
-    Mat new_map = map.clone();
-    for (int i = 0; i < map.rows; ++i) {
-        for (int j = 0; j < map.cols; ++j) {
-            bool have_at_least_one_neigb_occ = false;
-            int this_grid_occ = map.at<uchar>(i, j);
-            if (this_grid_occ == 1)
-                continue;
-            for (int l = i - 1; l <= i + 1; ++l) {
-                if (l >= 600 || l < 0)
-                    continue;
-                for (int m = j - 1; m <= j + 1; ++m) {
-                    if (m >= 1200 || m < 0)
-                        continue;
-                    int this_neighbor_occ = map.at<uchar>(l, m);
-                    if (this_neighbor_occ == 1) {
-                        have_at_least_one_neigb_occ = true;
-                        break;
-                    }
-                }
-                if (have_at_least_one_neigb_occ)
-                    break;
-            }
-            //¸ù¾İhave_at_least_one_neigb_occµÄÖµ¾ö¶¨ÅòÕÍÓë·ñ
-            if (have_at_least_one_neigb_occ) {
-                for (int l = i - index; l <= i + index; ++l) {
-                    if (l >= 600 || l < 0)
-                        continue;
-                    for (int m = j - index; m <= j + index; ++m) {
-                        if (m >= 1200 || m < 0)
-                            continue;
-                        new_map.at<uchar>(l, m) = 0;
-                    }
-                }
-            }
-        }
-    }
-    return new_map;
-}
-
-Mat shrink_race_track(Mat map, int index) {
-    Mat new_map = map.clone();
-    for (int i = 0; i < map.rows; ++i) {
-        for (int j = 0; j < map.cols; ++j) {
-            bool have_at_least_one_neigb_occ = false;
-            int this_grid_occ = map.at<uchar>(i, j);
-            if (this_grid_occ == 1)
-                continue;
-            for (int l = i - 1; l <= i + 1; ++l) {
-                if (l >= 600 || l < 0)
-                    continue;
-                for (int m = j - 1; m <= j + 1; ++m) {
-                    if (m >= 1200 || m < 0)
-                        continue;
-                    int this_neighbor_occ = map.at<uchar>(l, m);
-                    if (this_neighbor_occ == 1) {
-                        have_at_least_one_neigb_occ = true;
-                        break;
-                    }
-                }
-                if (have_at_least_one_neigb_occ)
-                    break;
-            }
-            //¸ù¾İhave_at_least_one_neigb_occµÄÖµ¾ö¶¨ÅòÕÍÓë·ñ
-            if (have_at_least_one_neigb_occ) {
-                for (int l = i - index; l <= i + index; ++l) {
-                    if (l >= 600 || l < 0)
-                        continue;
-                    for (int m = j - index; m <= j + index; ++m) {
-                        if (m >= 1200 || m < 0)
-                            continue;
-                        new_map.at<uchar>(l, m) = 1;
-                    }
-                }
-            }
-        }
-    }
-    return new_map;
-}
+    Point(int x_, int y_) : x(x_), y(y_) {}
+};
 
 int main() {
-    Mat img = imread("sysu6001200.png");
-    Mat gray_img, sysu, map, out;
-    cvtColor(img, gray_img, COLOR_RGB2GRAY);
-    threshold(gray_img, sysu, 0, 255, THRESH_BINARY);
-    map = sysu.clone();
-    int car_long = 0.12;
-    int car_wide = 0.06;
-    int resolution = 0.01;
-    Mat tmpmap = shrink_race_track(map, round(car_wide / resolution / 2));
-    map = gen_obstacle(tmpmap, map, 12, round(car_wide / resolution), 20, 5);
-    out = Mat::zeros(600, 1200, CV_8UC3);
-    for (int i = 0; i < map.rows; ++i) {
-        for (int j = 0; j < map.cols; ++j) {
-            if (map.at<uchar>(i, j) == 0)
-                out.at<Vec3b>(i, j)[0] = out.at<Vec3b>(i, j)[1] = out.at<Vec3b>(i, j)[2] = 255;
+    // ç”Ÿæˆåˆå§‹åœ°å›¾
+    const int map_width = 1200;
+    const int map_height = 600;
+    vector<vector<int>> map(map_height, vector<int>(map_width, 0));
+
+    // ç”Ÿæˆéšœç¢ç‰©
+    const int obstacle_wide = 12; // éšœç¢ç‰©å®½åº¦
+    const int safe_distance = 20; // å®‰å…¨è·ç¦»
+    const int car_wide = 6; // è½¦è¾†å®½åº¦
+
+    vector<Point> obstacle_list; // éšœç¢ç‰©åˆ—è¡¨
+    int obstacle_num_max = 5; // éšœç¢ç‰©æœ€å¤§æ•°ç›®
+
+    random_device rd;
+    mt19937 gen(rd());
+    uniform_int_distribution<> disx(obstacle_wide / 2, map_width - obstacle_wide / 2);
+    uniform_int_distribution<> disy(obstacle_wide / 2, map_height - obstacle_wide / 2);
+
+    while (obstacle_list.size() < obstacle_num_max) {
+        int x = disx(gen); // éšæœºç”Ÿæˆéšœç¢ç‰©ä¸­å¿ƒæ¨ªåæ ‡
+        int y = disy(gen); // éšæœºç”Ÿæˆéšœç¢ç‰©ä¸­å¿ƒçºµåæ ‡
+
+        bool safe = true; // è®°å½•è¯¥ä½ç½®æ˜¯å¦å®‰å…¨
+
+        for (auto& obstacle : obstacle_list) {
+            double dx = x - obstacle.x;
+            double dy = y - obstacle.y;
+            // åˆ¤æ–­éšœç¢ç‰©é—´è·æ˜¯å¦å¤§äºå®‰å…¨è·ç¦»
+            if (dx * dx + dy * dy < (obstacle_wide + car_wide + safe_distance) * (obstacle_wide + car_wide + safe_distance)) {
+                safe = false;
+                break;
+            }
+        }
+
+        if (safe) {
+            obstacle_list.emplace_back(x, y);
+            for (int i = y - obstacle_wide / 2; i <= y + obstacle_wide / 2; ++i) {
+                for (int j = x - obstacle_wide / 2; j <= x + obstacle_wide / 2; ++j) {
+                    map[i][j] = 1; // å°†éšœç¢ç‰©åŒºåŸŸæ ‡è®°ä¸º1
+                }
+            }
         }
     }
-    imwrite("out.png", out);
-    FileStorage f("sysu_standard.xml", FileStorage::WRITE);
-    f << "map" << map;
-    f << "out" << out;
-    f.release();
+
+    // è¾“å‡ºåœ°å›¾
+    for (int i = 0; i < map_height; ++i) {
+        for (int j = 0; j < map_width; ++j) {
+            cout << map[i][j];
+        }
+        cout << endl;
+    }
+
     return 0;
 }
