@@ -1,1 +1,39 @@
+#include <ros/ros.h>
+#include <nav_msgs/OccupancyGrid.h>
+#include <cstdlib>
 
+nav_msgs::OccupancyGrid map_data_;
+
+void generate_obstacles(nav_msgs::OccupancyGrid& map_data, int num_obstacles) {
+    int height = map_data.info.height;
+    int width = map_data.info.width;
+    
+    // 随机生成num_obstacles个障碍物
+    for (int i = 0; i < num_obstacles; ++i) {
+        int x = std::rand() % width;
+        int y = std::rand() % height;
+        int index = x + y * width;
+        if (map_data.data[index] == 0) {
+            map_data.data[index] = 100;
+        }
+    }
+}
+
+void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& map_data) {
+    int num_obstacles = 50; // 根据需要设置障碍物数量
+    map_data_ = *map_data;
+    generate_obstacles(map_data_, num_obstacles);
+
+    ros::NodeHandle nh;
+    ros::Publisher pub_map = nh.advertise<nav_msgs::OccupancyGrid>("/modified_map", 1);
+    pub_map.publish(map_data_);
+}
+
+int main(int argc, char** argv) {
+    std::srand(std::time(0)); // 设置随机数种子
+    ros::init(argc, argv, "obstacle_generator");
+    ros::NodeHandle nh;
+    ros::Subscriber sub_map = nh.subscribe("/map", 1, map_callback);
+    ros::spin();
+    return 0;
+}
