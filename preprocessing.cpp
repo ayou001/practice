@@ -3,6 +3,49 @@
 # include <iostream>
 # include<cstdlib>
 # include<algorithm>
+void shrink_race_track(int **map, int rows, int cols, int index){
+    for (int i=0; i<rows; i++){
+        for (int j=0; j<cols; j++){
+            bool have_at_least_one_neigb_occ = false;
+            int this_grid_occ = map[i][j];
+            if (this_grid_occ == 1){
+                continue;  // 已经是障碍物了，不需要shrink
+            }
+            for (int l=i-1; l<=i+1; l++){
+                if (l<0 || l>=rows)
+                    continue;
+                for (int m=j-1; m<=j+1; m++){
+                    if (m<0 || m>=cols)
+                        continue;
+                    if (l==i && m==j)
+                        continue;
+                    int this_neighbor_occ = map[l][m];
+                    if (this_neighbor_occ == 1){
+                        have_at_least_one_neigb_occ = true;
+                        break;
+                    }
+                }
+                if (have_at_least_one_neigb_occ)
+                    break;
+            }
+            // 根据have_at_least_one_neigb_occ的值决定膨胀与否
+            if (have_at_least_one_neigb_occ){
+                for (int l=i-index; l<=i+index; l++){
+                    if (l<0 || l>=rows)
+                        continue;
+                    for (int m=j-index; m<=j+index; m++){
+                        if (m<0 || m>=cols)
+                            continue;
+                        map[l][m] = 1;
+                    }
+                }
+            }
+            else {
+                map[i][j] = 0;
+            }
+        }
+    }
+}
 
 
 int **shrink_race_track(int **map, int rows, int cols, int index){
