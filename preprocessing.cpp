@@ -1,69 +1,163 @@
-#include <iostream>
-#include <vector>
-#include <random>
+#include "ros/ros.h"
+#include "nav_msgs/OccupancyGrid.h"
 
-using namespace std;
-
-// 定义二维坐标点结构体
-struct Point {
-    int x;
-    int y;
-
-    Point(int x_, int y_) : x(x_), y(y_) {}
-};
-
-int main() {
-    // 生成初始地图
-    const int map_width = 1200;
-    const int map_height = 600;
-    vector<vector<int>> map(map_height, vector<int>(map_width, 0));
-
-    // 生成障碍物
-    const int obstacle_wide = 12; // 障碍物宽度
-    const int safe_distance = 20; // 安全距离
-    const int car_wide = 6; // 车辆宽度
-
-    vector<Point> obstacle_list; // 障碍物列表
-    int obstacle_num_max = 5; // 障碍物最大数目
-
-    random_device rd;
-    mt19937 gen(rd());
-    uniform_int_distribution<> disx(obstacle_wide / 2, map_width - obstacle_wide / 2);
-    uniform_int_distribution<> disy(obstacle_wide / 2, map_height - obstacle_wide / 2);
-
-    while (obstacle_list.size() < obstacle_num_max) {
-        int x = disx(gen); // 随机生成障碍物中心横坐标
-        int y = disy(gen); // 随机生成障碍物中心纵坐标
-
-        bool safe = true; // 记录该位置是否安全
-
-        for (auto& obstacle : obstacle_list) {
-            double dx = x - obstacle.x;
-            double dy = y - obstacle.y;
-            // 判断障碍物间距是否大于安全距离
-            if (dx * dx + dy * dy < (obstacle_wide + car_wide + safe_distance) * (obstacle_wide + car_wide + safe_distance)) {
-                safe = false;
-                break;
+int **shrink_race_track(int **map, int rows, int cols, int index){
+    int **new_map = new int*[rows];
+    for (int i=0; i<rows; i++){
+        new_map[i] = new int[cols];
+        for (int j=0; j<cols; j++){
+            bool have_at_least_one_neigb_occ = false;
+            int this_grid_occ = map[i][j];
+            if (this_grid_occ == 1)
+                continue;
+            for (int l=i-1; l<=i+1; l++){
+                if (l<0 || l>=rows)
+                    continue;
+                for (int m=j-1; m<=j+1; m++){
+                    if (m<0 || m>=cols)
+                        continue;
+                    int this_neighbor_occ = map[l][m];
+                    if (this_neighbor_occ == 1){
+                        have_at_least_one_neigb_occ = true;
+                        break;
+                    }
+                }
+                if (have_at_least_one_neigb_occ)
+                    break;
             }
-        }
-
-        if (safe) {
-            obstacle_list.emplace_back(x, y);
-            for (int i = y - obstacle_wide / 2; i <= y + obstacle_wide / 2; ++i) {
-                for (int j = x - obstacle_wide / 2; j <= x + obstacle_wide / 2; ++j) {
-                    map[i][j] = 1; // 将障碍物区域标记为1
+            // 根据have_at_least_one_neigb_occ的值决定膨胀与否
+            if (have_at_least_one_neigb_occ){
+                for (int l=i-index; l<=i+index; l++){
+                    if (l<0 || l>=rows)
+                        continue;
+                    for (int m=j-index; m<=j+index; m++){
+                        if (m<0 || m>=cols)
+                            continue;
+                        new_map[l][m] = 1;
+                    }
                 }
             }
+            else {
+                new_map[i][j] = map[i][j];
+            }
+        }
+    }
+    return new_map;
+}
+
+void add_random_obstacles(int **map, int rows, int cols, int obstacle_wide, int car_wide, int safe_distance, int obstacle_num_max){
+    int obstacle_num = 0;
+    int row, col;
+    while (obstacle_num < obstacle_num_max){
+        row = rand() % rows;   // 随机选取一个位置
+        col = rand() % cols;
+
+        if (col < 100)     // 不能生成在初始位置
+            continue;
+
+        int safe_wide = obstacle_wide + car_wide + safe_distance;
+        bool have_at_least_one_neigb_occ = false;    // 有一个被占据说明不安全，无法生成
+        for (int l=row-safe_wide; l<=row+safe_wide; l++){
+            if (l<0 || l>=rows)
+                continue;
+            for (int m=col-safe_wide; m<=col+safe_wide; m++){
+                if (m<0 || m>=cols)
+                    continue;
+                int this_neighbor_occ = map[l][m];
+                if (this_neighbor_occ == 1){
+                    have_at_least_one_neigb_occ = true;
+                    break;
+                }
+            }
+            if (have_at_least_one_neigb_occ)
+                break;
+        }
+        if (!have_at_least_one_neigb_occ){
+            for (int l=row-obstacle_wide; l<=row+obstacle_wide; l++){
+                if (l<0 || l>=rows)
+                    continue;
+                for (int m=col-obstacle_wide; m<=col+obstacle_wide; m++){
+                    if (m<0 || m>=cols)
+                        continue;
+                    map[l][m] = 1;
+                }
+            }
+            obstacle_num = obstacle_num + 1;
+        }
+    }
+}
+
+void visualize_map(const ros::Publisher& pub, int **map, int rows, int cols){
+    nav_msgs::OccupancyGrid map_msg;
+    map_msg.header.frame_id = "map";
+    map_msg.info.resolution = 0.01;
+    map_msg.info.width = cols;
+    map_msg.info.height = rows;
+    map_msg.info.origin.position.x = -6.0;
+    map_msg.info.origin.position.y = -3.0;
+    map_msg.info.origin.orientation.w = 1.0;
+
+    std::vector<int8_t> data(rows*cols);
+    for (int i=0; i<rows; i++){
+        for (int j=0; j<cols; j++){
+            int index = cols*i + j;
+            if (map[i][j] == 1)
+                data[index] = 100;
+            else
+                data[index] = 0;
         }
     }
 
-    // 输出地图
-    for (int i = 0; i < map_height; ++i) {
-        for (int j = 0; j < map_width; ++j) {
-            cout << map[i][j];
+    map_msg.data = data;
+
+    pub.publish(map_msg);
+}
+
+void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg){
+    int rows = msg->info.height;
+    int cols = msg->info.width;
+
+    int **map = new int*[rows];
+    for (int i=0; i<rows; i++){
+        map[i] = new int[cols];
+        for (int j=0; j<cols; j++){
+            int index = cols*i + j;
+            if (msg->data[index] == -1){
+                map[i][j] = 0;  // 未知空间
+            }
+            else if (msg->data[index] == 100){
+                map[i][j] = 1;  // 障碍物
+            }
+            else {
+                map[i][j] = 0;  // 自由空间
+            }
         }
-        cout << endl;
     }
+
+    // 对地图进行处理并生成新的地图
+
+    int index = 5;
+    map = shrink_race_track(map, rows, cols, index);
+
+    int obstacle_wide = 2;
+    int car_wide = 3;
+    int safe_distance = 1;
+    int obstacle_num_max = 10;
+    add_random_obstacles(map, rows, cols, obstacle_wide, car_wide, safe_distance, obstacle_num_max);
+
+    // 可视化新的地图
+    ros::NodeHandle nh;
+    ros::Publisher pub = nh.advertise<nav_msgs::OccupancyGrid>("visualized_map", 1);
+    visualize_map(pub, map, rows, cols);
+}
+
+int main(int argc, char **argv){
+    ros::init(argc, argv, "map_subscriber");
+    ros::NodeHandle nh;
+
+    ros::Subscriber sub = nh.subscribe("/map", 1, map_callback);
+
+    ros::spin();
 
     return 0;
 }
