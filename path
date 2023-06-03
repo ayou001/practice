@@ -1,256 +1,151 @@
 #include <ros/ros.h>
 #include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/Path.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <tf2/LinearMath/Quaternion.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <queue>
-#include <unordered_map>
-#include <cmath>
-#include <visualization_msgs/Marker.h>
 
-// 定义节点数据结构
 struct Node {
-    int x;
-    int y;
-    float g;
-    float h;
-    float f;
+    int x, y;
+    int f, g, h;
     Node* parent;
+    Node(int _x, int _y, int _f, int _g, int _h, Node* _p) : x(_x), y(_y), f(_f), g(_g), h(_h), parent(_p) {}
 };
 
-// 定义比较器，用于自定义优先队列排序规则
-struct NodeCompare {
-    bool operator()(const Node* n1, const Node* n2) const {
-        return n1->f > n2->f;
+class AstarPlanner {
+private:
+    ros::NodeHandle nh_;
+    ros::Subscriber map_sub_;
+    ros::Publisher path_pub_;
+    nav_msgs::OccupancyGrid map_;
+    bool map_received_;
+public:
+    AstarPlanner() : map_received_(false) {
+        map_sub_ = nh_.subscribe<nav_msgs::OccupancyGrid>("map", 1, &AstarPlanner::mapCallback, this);
+        path_pub_ = nh_.advertise<nav_msgs::Path>("path", 1);
     }
-};
 
-// 声明全局变量
-nav_msgs::OccupancyGrid::ConstPtr map_msg;
-geometry_msgs::PoseStamped start_pose;
-geometry_msgs::PoseStamped end_pose;
-ros::Publisher path_pub;
-tf2_ros::Buffer tf_buffer;
-tf2_ros::TransformListener tf_listener(tf_buffer);
+    void mapCallback(const nav_msgs::OccupancyGridConstPtr& msg) {
+        map_ = *msg;
+        map_received_ = true;
+    }
 
-// 映射一个整型坐标到一个唯一的哈希值，用于存储在unordered_map中
-size_t hash_node(const Node* node) {
-    return node->x + node->y * map_msg->info.width;
-}
+    std::vector<Node*> neighborNodes(Node* curr) {
+        std::vector<Node*> neighbors;
+        int dx[] = {-1, 0, 1, 0};
+        int dy[] = {0, -1, 0, 1};
+        for (int i=0; i<4; i++) {
+            int nx = curr->x + dx[i];
+            int ny = curr->y + dy[i];
+            if (nx < 0 || nx >= map_.info.width || ny < 0 || ny >= map_.info.height)
+                continue;
+            int index = ny * map_.info.width + nx;
+            if (map_.data[index] == 100)  // 障碍物
+                continue;
+            int g = curr->g + abs(dx[i]) + abs(dy[i]);  // 计算新的g值
+            int h = abs(nx - goal_x_) + abs(ny - goal_y_);  // 计算新的h值
+            int f = g + h;  // 计算新的f值
+            Node* neighbor = new Node(nx, ny, f, g, h, curr);
+            neighbors.push_back(neighbor);
+        }
+        return neighbors;
+    }
 
-// 判断一个节点是否在地图范围内，并且不是障碍物或已访问节点
-bool is_valid_node(const Node* node) {
-    if (node->x < 0 || node->x >= map_msg->info.width ||
-        node->y < 0 || node->y >= map_msg->info.height)
-        return false;
-    int index = node->x + node->y * map_msg->info.width;
-    int value = map_msg->data[index];
-    return value >= 0 && value < 100;
-}
+    bool isGoal(Node* node) {
+        return node->x == goal_x_ && node->y == goal_y_;
+    }
 
-// 计算两个节点之间的欧式距离
-float euclidean_distance(const Node* n1, const Node* n2) {
-    float dx = n1->x - n2->x;
-    float dy = n1->y - n2->y;
-    return sqrt(dx * dx + dy * dy);
-}
+    void publishPath(std::vector<Node*>& path_nodes) {
+        nav_msgs::Path path;
+        path.header.stamp = ros::Time::now();
+        path.header.frame_id = "map";
+        for (int i=path_nodes.size()-1; i>=0; i--) {
+            geometry_msgs::PoseStamped pose;
+            pose.pose.position.x = (path_nodes.at(i)->x + 0.5) * map_.info.resolution + map_.info.origin.position.x;
+            pose.pose.position.y = (path_nodes.at(i)->y + 0.5) * map_.info.resolution + map_.info.origin.position.y;
+            pose.pose.orientation.w = 1.0;
+            path.poses.push_back(pose);
+        }
+        path_pub_.publish(path);
+    }
 
-// 计算两个节点之间的曼哈顿距离
-float manhattan_distance(const Node* n1, const Node* n2) {
-    float dx = abs(n1->x - n2->x);
-    float dy = abs(n1->y - n2->y);
-    return dx + dy;
-}
+    void plan(int start_x, int start_y, int goal_x, int goal_y) {
+        if (!map_received_) {
+            ROS_WARN("Map has not been received yet. Unable to plan.");
+            return;
+        }
+        goal_x_ = goal_x;
+        goal_y_ = goal_y;
 
-// 计算两个节点之间的对角线距离
-float diagonal_distance(const Node* n1, const Node* n2) {
-    float dx = abs(n1->x - n2->x);
-    float dy = abs(n1->y - n2->y);
-    return fmax(dx, dy) + 0.4142f * fmin(dx, dy);
-}
+        std::priority_queue<Node*, std::vector<Node*>, [](Node* a, Node* b) {return a->f > b->f;}> open;  // A* open队列
+        std::vector<Node*> closed;  // A* closed列表
+        Node* start = new Node(start_x, start_y, 0, 0, 0, nullptr);
+        open.push(start);
 
-// 寻找最优路径并返回其节点指针，如果没有可行路径则返回空指针
-Node* find_path() {
-    // 创建起始节点和结束节点
-    Node* start_node = new Node{int(start_pose.pose.position.x / map_msg->info.resolution),
-                                 int(start_pose.pose.position.y / map_msg->info.resolution),
-                                 0.0f,
-                                 0.0f,
-                                 0.0f,
-                                 nullptr};
-    Node* end_node = new Node{int(end_pose.pose.position.x / map_msg->info.resolution),
-                               int(end_pose.pose.position.y / map_msg->info.resolution),
-                               0.0f,
-                               0.0f,
-                               0.0f,
-                               nullptr};
-
-    // 创建开放列表和关闭列表
-    std::priority_queue<Node*, std::vector<Node*>, NodeCompare> open_list;
-    std::unordered_map<size_t, Node*> close_list;
-
-    // 初始化起始节点的 f 值，并添加到开放列表中
-    start_node->f = start_node->g + euclidean_distance(start_node, end_node);
-    open_list.push(start_node);
-
-    while (!open_list.empty()) {
-        // 取出当前 f 值最小的节点
-        Node* current_node = open_list.top();
-        open_list.pop();
-
-        // 如果当前节点是目标节点，则返回其指针
-        if (current_node->x == end_node->x && current_node->y == end_node->y)
-            return current_node;
-
-        // 把当前节点加入到关闭列表中
-        close_list[hash_node(current_node)] = current_node;
-
-        // 枚举当前节点的所有有效邻居节点
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                if (dx == 0 && dy == 0)
-                    continue;
-
-                Node* neighbor_node = new Node{current_node->x + dx,
-                                               current_node->y + dy,
-                                               current_node->g + euclidean_distance(current_node, neighbor_node),
-                                               euclidean_distance(neighbor_node, end_node),
-                                               0.0f,
-                                               current_node};
-
-                // 如果邻居节点不是有效节点，则跳过
-                if (!is_valid_node(neighbor_node))
-                    continue;
-
-                size_t hash_value = hash_node(neighbor_node);
-
-                // 如果邻居节点已经在关闭列表中，则跳过
-                if (close_list.count(hash_value) > 0)
-                    continue;
-
-                // 如果邻居节点不在开放列表中，则添加到开放列表中
-                if (open_list.empty() || std::find(open_list.c.begin(), open_list.c.end(), neighbor_node) == open_list.c.end()) {
-                    neighbor_node->h = euclidean_distance(neighbor_node, end_node);
-                    neighbor_node->f = neighbor_node->g + neighbor_node->h;
-                    neighbor_node->parent = current_node;
-                    open_list.push(neighbor_node);
+        while (!open.empty()) {
+            Node* curr = open.top();
+            open.pop();
+            if (isGoal(curr)) {
+                std::vector<Node*> path_nodes;  // 存储从起点到终点的路径节点
+                while (curr != nullptr) {
+                    path_nodes.push_back(curr);
+                    curr = curr->parent;
                 }
-                // 否则，更新邻居节点的 g 值和父节点
-                else {
-                    auto it = std::find(open_list.c.begin(), open_list.c.end(), neighbor_node);
-                    if (it != open_list.c.end()) {
-                        float new_g = current_node->g + euclidean_distance(current_node, neighbor_node);
-                        if (new_g < (*it)->g) {
-                            (*it)->g = new_g;
-                            (*it)->f = (*it)->g + (*it)->h;
-                            (*it)->parent = current_node;
-                        }
+                publishPath(path_nodes);
+                break;
+            }
+            std::vector<Node*> neighbors = neighborNodes(curr);
+            for (Node* neighbor : neighbors) {
+                bool alreadyInClosed = false;
+                for (Node* closed_node : closed) {
+                    if (neighbor->x == closed_node->x && neighbor->y == closed_node->y) {
+                        alreadyInClosed = true;
+                        break;
                     }
                 }
+                if (alreadyInClosed)
+                    continue;
+                bool alreadyInOpen = false;
+                for (Node* open_node : open._Get_container()) {
+                    if (neighbor->x == open_node->x && neighbor->y == open_node->y) {
+                        alreadyInOpen = true;
+                        if (neighbor->g < open_node->g) {
+                            open_node->g = neighbor->g;
+                            open_node->f = open_node->g + open_node->h;
+                            open_node->parent = neighbor->parent;
+                        }
+                        break;
+                    }
+                }
+                if (!alreadyInOpen) {
+                    open.push(neighbor);
+                }
             }
+            closed.push_back(curr);
+        }
+
+        // 释放内存
+        for (Node* node : closed) {
+            delete node;
+        }
+        while (!open.empty()) {
+            Node* node = open.top();
+            open.pop();
+            delete node;
         }
     }
 
-    // 如果没有可行路径，则返回空指针
-    return nullptr;
-}
+private:
+    int goal_x_;
+    int goal_y_;
+};
 
-// 发布路径消息
-void publish_path(const Node* end_node) {
-    // 创建路径消息
-    nav_msgs::Path path_msg;
-    path_msg.header.stamp = ros::Time::now();
-    path_msg.header.frame_id = map_msg->header.frame_id;
-
-    // 从目标节点回溯到起始节点，构建路径消息
-    Node* current_node = const_cast<Node*>(end_node);
-    while (current_node) {
-        geometry_msgs::PoseStamped pose;
-        pose.header.stamp = ros::Time::now();
-        pose.header.frame_id = map_msg->header.frame_id;
-        pose.pose.position.x = current_node->x * map_msg->info.resolution;
-        pose.pose.position.y = current_node->y * map_msg->info.resolution;
-        pose.pose.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
-        path_msg.poses.push_back(pose);
-        current_node = current_node->parent;
-    }
-
-    // 反转路径消息，使其从起始节点到目标节点
-    std::reverse(path_msg.poses.begin(), path_msg.poses.end());
-
-    // 发布路径消息
-    path_pub.publish(path_msg);
-
-    // 发布可视化标记
-    visualization_msgs::Marker marker;
-    marker.header.stamp = ros::Time::now();
-    marker.header.frame_id = map_msg->header.frame_id;
-    marker.type = visualization_msgs::Marker::LINE_STRIP;
-    marker.action = visualization_msgs::Marker::ADD;
-    marker.scale.x = 0.1;
-
-    for (auto pose : path_msg.poses) {
-        geometry_msgs::Point pt = pose.pose.position;
-        marker.points.push_back(pt);
-    }
-
-    path_pub.publish(marker);
-}
-
-// 主函数
 int main(int argc, char** argv) {
-    // 初始化ROS节点
-    ros::init(argc, argv, "path_planning_node");
-    ros::NodeHandle nh;
-
-    // 创建地图和路径发布器
-    ros::Subscriber map_sub = nh.subscribe("map", 1, &map_callback);
-    path_pub = nh.advertise<nav_msgs::Path>("path", 1);
-
-    // 循环等待
-    ros::spin();
-
-    return 0;
-}
-
-// 地图回调函数
-void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
-    // 保存地图消息
-    map_msg = msg;
-
-    // 创建坐标变换监听器
-    tf2_ros::TransformListener tf_listener(tf_buffer);
+    ros::init(argc, argv, "astar_planner");
+    AstarPlanner astar_planner;
+    ros::Rate rate(10.0);
 
     while (ros::ok()) {
-        // 尝试获取起始和目标姿态
-        try {
-            start_pose = tf_buffer.lookupTransform(map_msg->header.frame_id, "start", ros::Time(0));
-            end_pose = tf_buffer.lookupTransform(map_msg->header.frame_id, "end", ros::Time(0));
-        } catch (tf2::TransformException& ex) {
-            ROS_WARN("%s", ex.what());
-            ros::Duration(1.0).sleep();
-            continue;
-        }
-
-        // 寻找最优路径
-        Node* end_node = find_path();
-
-        if (end_node) {
-            // 发布路径消息
-            publish_path(end_node);
-
-            // 释放节点内存
-            while (end_node) {
-                Node* temp_node = end_node->parent;
-                delete end_node;
-                end_node = temp_node;
-            }
-        } else {
-            ROS_WARN("Failed to find path.");
-        }
-
-        break;
+        ros::spinOnce();
+        rate.sleep();
     }
+
+    return 0;
 }
