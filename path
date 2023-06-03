@@ -1,387 +1,315 @@
 #include <ros/ros.h>
 #include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/Path.h>
-#include <visualization_msgs/Marker.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <tf/transform_datatypes.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
 #include <queue>
+#include <algorithm>
 
-struct Node {
-    int x, y;
-    int f, g, h;
+// 定义节点类，用于存储搜索过程中的节点信息
+class Node
+{
+public:
+    int x;
+    int y;
+    double g;  // 节点到起点的代价
+    double f;  // 估计代价函数值：f=g+h
     Node* parent;
-    Node(int _x, int _y, int _f, int _g, int _h, Node* _p) : x(_x), y(_y), f(_f), g(_g), h(_h), parent(_p) {}
+
+    Node(int x_, int y_, double g_, Node* parent_)
+        :x(x_), y(y_), g(g_), f(0), parent(parent_)
+    {}
+
+    // 定义启发函数heuristic：计算该节点到终点的曼哈顿距离
+    static double heuristic(const Node* a, const Node* b)
+    {
+        // 曼哈顿距离=横向距离+纵向距离
+        return std::abs(a->x - b->x) + std::abs(a->y - b->y);
+    }
 };
 
-class AstarPlanner {
+// 定义Hybrid A*路径规划器类
+class HybridAstarPlanner
+{
 private:
     ros::NodeHandle nh_;
     ros::Subscriber map_sub_;
-    ros::Publisher path_pub_, marker_pub_;
-    nav_msgs::OccupancyGrid map_;
-    bool map_received_;
+    ros::Publisher path_pub_;
+    const double resolution_;
+    const int map_origin_x_;
+    const int map_origin_y_;
+    std::vector<int8_t> map_data_;
+    int map_width_;
+    int map_height_;
+    // 定义地图尺寸和障碍物坐标
+    const int map_size_x_;
+    const int map_size_y_;
+    std::vector<std::pair<int, int>> obstacles_;
+
 public:
-    AstarPlanner() : map_received_(false) {
-        map_sub_ = nh_.subscribe<nav_msgs::OccupancyGrid>("map", 1, &AstarPlanner::mapCallback, this);
-        path_pub_ = nh_.advertise<nav_msgs::Path>("path", 1);
-        marker_pub_ = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
-    }
-
-    void mapCallback(const nav_msgs::OccupancyGridConstPtr& msg) {
-        map_ = *msg;
-        map_received_ = true;
-    }
-
-    std::vector<Node*> neighborNodes(Node* curr) {
-        std::vector<Node*> neighbors;
-        int dx[] = {-1, 0, 1, 0};
-        int dy[] = {0, -1, 0, 1};
-        for (int i=0; i<4; i++) {
-            int nx = curr->x + dx[i];
-            int ny = curr->y + dy[i];
-            if (nx < 0 || nx >= map_.info.width || ny < 0 || ny >= map_.info.height)
-                continue;
-            int index = ny * map_.info.width + nx;
-            if (map_.data[index] == 100)  // 障碍物
-                continue;
-            int g = curr->g + abs(dx[i]) + abs(dy[i]);  // 计算新的g值
-            int h = abs(nx - goal_x_) + abs(ny - goal_y_);  // 计算新的h值
-            int f = g + h;  // 计算新的f值
-            Node* neighbor = new Node(nx, ny, f, g, h, curr);
-            neighbors.push_back(neighbor);
-        }
-        return neighbors;
-    }
-
-    bool isGoal(Node* node) {
-        return node->x == goal_x_ && node->y == goal_y_;
-    }
-
-    void publishPath(std::vector<Node*>& path_nodes) {
-        nav_msgs::Path path;
-        path.header.stamp = ros::Time::now();
-        path.header.frame_id = "map";
-        for (int i=path_nodes.size()-1; i>=0; i--) {
-            geometry_msgs::PoseStamped pose;
-            pose.pose.position.x = (path_nodes.at(i)->x + 0.5) * map_.info.resolution + map_.info.origin.position.x;
-            pose.pose.position.y = (path_nodes.at(i)->y + 0.5) * map_.info.resolution + map_.info.origin.position.y;
-            pose.pose.orientation.w = 1.0;
-            path.poses.push_back(pose);
-        }
-        path_pub_.publish(path);
-
-        // 显示路径的可视化Marker
-        visualization_msgs::Marker marker;
-        marker.header.frame_id = "map";
-        marker.header.stamp = ros::Time::now();
-        marker.ns = "path";
-        marker.id = 0;
-        marker.type = visualization_msgs::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::Marker::ADD;
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.1;
-        marker.color.r = 1.0;
-        marker.color.a = 1.0;
-        for (int i=path_nodes.size()-1; i>=0; i--) {
-            geometry_msgs::Point point;
-            point.x = (path_nodes.at(i)->x + 0.5) * map_.info.resolution + map_.info.origin.position.x;
-            point.y = (path_nodes.at(i)->y + 0.5) * map_.info.resolution + map_.info.origin.position.y;
-            point.z = 0.0;
-            marker.points.push_back(point);
-        }
-        marker_pub_.publish(marker);
-    }
-
-    void plan(int start_x, int start_y, int goal_x, int goal_y) {
-        if (!map_received_) {
-            ROS_WARN("Map has not been received yet. Unable to plan.");
-            return;
-        }
-        goal_x_ = goal_x;
-        goal_y_ = goal_y;
-
-        std::priority_queue<Node*, std::vector<Node*>, [](Node* a, Node* b) {return a->f > b->f;}> open;  // A* open队列
-        std::vector<Node*> closed;  // A* closed列表
-        Node* start = new Node(start_x, start_y, 0, 0, 0, nullptr);
-        open.push(start);
-
-        while (!open.empty()) {
-            Node* curr = open.top();
-            open.pop();
-            if (isGoal(curr)) {
-                std::vector<Node*> path_nodes;  // 存储从起点到终点的路径节点
-                while (curr != nullptr) {
-                    path_nodes.push_back(curr);
-                    curr = curr->parent;
-                }
-                publishPath(path_nodes);
-                break;
-            }
-            std::vector<Node*> neighbors = neighborNodes(curr);
-            for (Node* neighbor : neighbors) {
-                bool alreadyInClosed = false;
-                for (Node* closed_node : closed) {
-                    if (neighbor->x == closed_node->x && neighbor->y == closed_node->y) {
-                        alreadyInClosed = true;
-                        break;
-                    }
-                }
-                if (alreadyInClosed)
-                    continue;
-                bool alreadyInOpen = false;
-                for (Node* open_node : open._Get_container()) {
-                    if (neighbor->x == open_node->x && neighbor->y == open_node->y) {
-                        alreadyInOpen = true;
-                        if (neighbor->g < open_node->g) {
-                            open_node->g = neighbor->g;
-                            open_node->f = open_node->g + open_node->h;
-                            open_node->parent = neighbor->parent;
-                        }
-                        break;
-                    }
-                }
-                if (!alreadyInOpen) {
-                    open.push(neighbor);
-                }
-            }
-            closed.push_back(curr);
-        }
-
-        // 释放内存
-        for (Node* node : closed) {
-            delete node;
-        }
-        while (!open.empty()) {
-            Node* node = open.top();
-            open.pop();
-            delete node;
-        }
-    }
-
-private:
-    int goal_x_;
-    int goal_y_;
-};
-
-int main(int argc, char** argv) {
-    ros::init(argc, argv, "astar_planner");
-    AstarPlanner astar_planner;
-    ros::Rate rate(10.0);
-
-    // 获取起点和终点坐标
-    int start_x, start_y;
-    int goal_x, goal_y;
-    ROS_INFO("Please input the start point x and y coordinates (separate with space):");
-    std::cin >> start_x >> start_y;
-    ROS_INFO("Please input the goal point x and y coordinates (separate with space):");
-    std::cin >> goal_x >> goal_y;
-
-    while (ros::ok()) {
-        ros::spinOnce();
-
-        // 进行路径规划
-        astar_planner.plan(start_x, start_y, goal_x, goal_y);
-
-        rate.sleep();
-    }
-
-    return 0;
-}
-
-..........
-#include <ros/ros.h>
-#include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/Path.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <visualization_msgs/Marker.h>
-
-// OMPL库
-#include <ompl/base/spaces/SE2StateSpace.h>
-#include <ompl/geometric/SimpleSetup.h>
-#include <ompl/geometric/planners/prm/PRM.h>
-#include <ompl/geometric/planners/hybridHybridASTAR.h>
-
-class HybridAstarPlanner
-{
-public:
-    HybridAstarPlanner() : map_received_(false), nh_("~")
+    HybridAstarPlanner()
+        :resolution_(0.1), map_origin_x_(-10), map_origin_y_(-15),
+         map_size_x_(20), map_size_y_(30),
+         obstacles_{{2,5},{3,5},{4,5},{5,5},{6,5},{7,5},{8,5},
+                    {12,15},{13,15},{14,15},{15,15}}
     {
         // 订阅地图信息
-        map_sub_ = nh_.subscribe("map", 1, &HybridAstarPlanner::mapCallback, this);
-
-        // 发布路径和可视化Marker
+        map_sub_ = nh_.subscribe("/map", 1, &HybridAstarPlanner::mapCallback, this);
+        // 发布路径信息
         path_pub_ = nh_.advertise<nav_msgs::Path>("path", 1);
-        marker_pub_ = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
-
-        // 读取起点和终点坐标
-        nh_.param<int>("start_x", start_x_, 0);
-        nh_.param<int>("start_y", start_y_, 0);
-        nh_.param<int>("goal_x", goal_x_, 0);
-        nh_.param<int>("goal_y", goal_y_, 0);
     }
 
-    // 地图回调函数
-    void mapCallback(const nav_msgs::OccupancyGridConstPtr& msg)
+    // 地图回调函数，将地图信息存储到map_data_中
+    void mapCallback(const nav_msgs::OccupancyGrid& msg)
     {
-        // 将地图存储为二维数组
-        map_.resize(msg->info.width, std::vector<int>(msg->info.height, 0));
-        for (int x = 0; x < msg->info.width; x++)
+        map_width_ = msg.info.width;
+        map_height_ = msg.info.height;
+        map_data_ = msg.data;
+    }
+
+    // 检查是否越界或者障碍物
+    bool isValid(const int x, const int y) const
+    {
+        if (x < 0 || x >= map_width_ || y < 0 || y >= map_height_) return false;
+        if (map_data_[y * map_width_ + x] != 0) return false;
+        for (auto& obstacle : obstacles_)
         {
-            for (int y = 0; y < msg->info.height; y++)
+            if (x == obstacle.first && y == obstacle.second) return false;
+        }
+        return true;
+    }
+
+    // 使用A*算法从起点搜索到终点，返回路径
+    std::vector<Node> searchPath(const Node& start, const Node& goal) const
+    {
+        std::vector<Node> path;
+        std::vector<Node*> closed_set;
+        std::priority_queue<Node*, std::vector<Node*>, CompareNodes> open_set;
+
+        // 将起点加入open_set中
+        open_set.push(new Node(start.x, start.y, 0, nullptr));
+
+        // 循环搜索直到open_set为空
+        while (!open_set.empty())
+        {
+            Node* current = open_set.top();
+            open_set.pop();
+            closed_set.push_back(current);
+
+            if (current->x == goal.x && current->y == goal.y)  // 终点节点
             {
-                int i = y * msg->info.width + x;
-                if (msg->data[i] >= 50)  // 障碍物
-                    map_[x][y] = 1;
-                else
-                    map_[x][y] = 0;
+                // 反向遍历节点，得到路径
+                while (current)
+                {
+                    path.push_back(*current);
+                    current = current->parent;
+                }
+                std::reverse(path.begin(), path.end());
+
+                // 清空open_set和closed_set
+                while (!open_set.empty())
+                {
+                    delete open_set.top();
+                    open_set.pop();
+                }
+                for (auto& node : closed_set)
+                {
+                    delete node;
+                }
+                closed_set.clear();
+
+                return path;
+            }
+
+            // 扩展当前节点周围的四个节点
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    if (dx == 0 && dy == 0) continue;
+                    int x = current->x + dx;
+                    int y = current->y + dy;
+
+                    // 检查是否越界或者障碍物
+                    if (!isValid(x, y)) continue;
+
+                    // 计算该节点到起点的代价和估计代价
+                    double g = current->g + std::sqrt(dx * dx + dy * dy);
+                    double f = g + Node::heuristic(new Node(x, y, 0, nullptr), &goal);
+
+                    // 如果该节点已经在closed_set中，则跳过
+                    bool in_closed_set = false;
+                    for (auto& node : closed_set)
+                    {
+                        if (node->x == x && node->y == y)
+                        {
+                            in_closed_set = true;
+                            break;
+                        }
+                    }
+                    if (in_closed_set) continue;
+
+                    // 将该节点加入open_set中
+                    bool in_open_set = false;
+                    Node* node_ptr = nullptr;
+                    for (auto& node : open_set)
+                    {
+                        if (node->x == x && node->y == y)
+                        {
+                            in_open_set = true;
+                            node_ptr = node;
+                            break;
+                        }
+                    }
+                    if (!in_open_set)
+                    {
+                        node_ptr = new Node(x, y, g, current);
+                        open_set.push(node_ptr);
+                    }
+                    else if (g < node_ptr->g)
+                    {
+                        node_ptr->g = g;
+                        node_ptr->f = g + Node::heuristic(node_ptr, &goal);
+                        node_ptr->parent = current;
+                    }
+                }
             }
         }
 
-        map_origin_x_ = msg->info.origin.position.x;
-        map_origin_y_ = msg->info.origin.position.y;
-        map_resolution_ = msg->info.resolution;
+        // 清空open_set和closed_set
+        while (!open_set.empty())
+        {
+            delete open_set.top();
+            open_set.pop();
+        }
+        for (auto& node : closed_set)
+        {
+            delete node;
+        }
+        closed_set.clear();
 
-        map_received_ = true;
+        return path;
     }
 
-    // 检查状态是否有效（即是否在自由空间内）
-    bool isStateValid(const ompl::base::State* state) const
+    // 使用贪心算法对路径进行光滑化处理
+    std::vector<Node> smoothPath(const std::vector<Node>& path) const
     {
-        double xy[2];
-        auto se2state = state->as<ompl::base::SE2StateSpace::StateType>();
-        double x = se2state->getX() / map_resolution_ + map_origin_x_;
-        double y = se2state->getY() / map_resolution_ + map_origin_y_;
-        return isValid(x, y);
+        if (path.size() <= 2) return path;
+
+        std::vector<Node> new_path;
+        new_path.push_back(path[0]);
+        for (size_t i = 1; i < path.size() - 1; i++)
+        {
+            const Node& prev = path[i-1];
+            const Node& curr = path[i];
+            const Node& next = path[i+1];
+
+            double prev_to_curr = std::sqrt(std::pow(prev.x-curr.x, 2) + std::pow(prev.y-curr.y, 2));
+            double curr_to_next = std::sqrt(std::pow(curr.x-next.x, 2) + std::pow(curr.y-next.y, 2));
+            double prev_to_next = std::sqrt(std::pow(prev.x-next.x, 2) + std::pow(prev.y-next.y, 2));
+
+            // 检查是否三个节点共线
+            if (prev_to_curr + curr_to_next == prev_to_next)
+            {
+                continue;
+            }
+
+                        double x1 = curr.x + (prev.x - curr.x) * curr_to_next / prev_to_curr;
+            double y1 = curr.y + (prev.y - curr.y) * curr_to_next / prev_to_curr;
+            double x2 = curr.x + (next.x - curr.x) * curr_to_next / prev_to_next;
+            double y2 = curr.y + (next.y - curr.y) * curr_to_next / prev_to_next;
+
+            // 计算夹角
+            double angle = std::atan2(y2 - y1, x2 - x1);
+
+            // 在curr和next之间插入一个新节点
+            new_path.push_back(Node(static_cast<int>(std::round(x1)), static_cast<int>(std::round(y1)), 0, nullptr));
+            new_path.back().parent = &new_path[new_path.size()-2];
+            new_path.push_back(Node(static_cast<int>(std::round(x2)), static_cast<int>(std::round(y2)), 0, nullptr));
+            new_path.back().parent = &new_path[new_path.size()-2];
+            new_path.back().f = Node::heuristic(&new_path.back(), &new_path.front()) + new_path.back().g;
+            new_path.back().f += angle * angle;  // 加上夹角作为代价，用于凸优化
+
+            new_path.push_back(curr);
+        }
+        new_path.push_back(path.back());
+
+        return new_path;
     }
 
-    // 检查坐标是否在自由空间内
-    bool isValid(int x, int y) const
+    // 将路径中的节点转换成实际坐标值
+    std::vector<geometry_msgs::PoseStamped> convertPathToPoses(const std::vector<Node>& path) const
     {
-        if (x < 0 || x >= map_.size() || y < 0 || y >= map_[0].size())
-            return false;
-        return map_[x][y] == 0;
+        std::vector<geometry_msgs::PoseStamped> poses;
+        for (const auto& node : path)
+        {
+            geometry_msgs::PoseStamped pose;
+            pose.pose.position.x = node.x * resolution_ + map_origin_x_;
+            pose.pose.position.y = node.y * resolution_ + map_origin_y_;
+            pose.pose.orientation = tf::createQuaternionMsgFromYaw(0);
+            poses.push_back(pose);
+        }
+        return poses;
     }
 
-    // 发布路径和可视化Marker
-    void publishPath(std::vector<geometry_msgs::PoseStamped>& path)
+    // 发布路径信息
+    void publishPath(const std::vector<Node>& path) const
     {
         nav_msgs::Path path_msg;
         path_msg.header.stamp = ros::Time::now();
         path_msg.header.frame_id = "map";
-        for (auto& pose : path)
-        {
-            path_msg.poses.push_back(pose);
-        }
+        path_msg.poses = convertPathToPoses(path);
         path_pub_.publish(path_msg);
-
-        // 可视化路径的Marker
-        visualization_msgs::Marker marker;
-        marker.header.frame_id = "map";
-        marker.header.stamp = ros::Time::now();
-        marker.ns = "path";
-        marker.id = 0;
-        marker.type = visualization_msgs::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::Marker::ADD;
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.1;
-        marker.color.r = 1.0;
-        marker.color.a = 1.0;
-        for (auto& pose : path)
-        {
-            marker.points.push_back(pose.pose.position);
-        }
-        marker_pub_.publish(marker);
     }
 
-    void generatePlan()
+    // 执行Hybrid A*路径规划
+    void run(const geometry_msgs::PoseStamped& start_pose, const geometry_msgs::PoseStamped& goal_pose)
     {
-        if (!map_received_)
-        {
-            ROS_WARN("Map has not been received yet. Unable to plan.");
-            return;
-        }
+        Node start(static_cast<int>((start_pose.pose.position.x - map_origin_x_) / resolution_),
+                   static_cast<int>((start_pose.pose.position.y - map_origin_y_) / resolution_),
+                   0.0, nullptr);
 
-        // 创建状态空间
-        auto space(std::make_shared<ompl::base::SE2StateSpace>());
-        ompl::base::RealVectorBounds bounds(2);
-        bounds.setLow(0);
-        bounds.high[0] = map_.size() * map_resolution_;
-        bounds.high[1] = map_[0].size() * map_resolution_;
-        space->setBounds(bounds);
+        Node goal(static_cast<int>((goal_pose.pose.position.x - map_origin_x_) / resolution_),
+                  static_cast<int>((goal_pose.pose.position.y - map_origin_y_) / resolution_),
+                  0.0, nullptr);
 
-        // 设置起点和终点
-        ompl::base::ScopedState<> start(space), goal(space);
-        start[0] = start_x_ * map_resolution_ + map_origin_x_;
-        start[1] = start_y_ * map_resolution_ + map_origin_y_;
-        goal[0] = goal_x_ * map_resolution_ + map_origin_x_;
-        goal[1] = goal_y_ * map_resolution_ + map_origin_y_;
-
-        // 创建SimpleSetup
-        ompl::geometric::SimpleSetup ss(space);
-
-        // 设置验证器（检查状态是否有效）
-        ss.setStateValidityChecker(std::bind(&HybridAstarPlanner::isStateValid, this, std::placeholders::_1));
-
-        // 创建规划器（这里使用Hybrid A*）
-        ompl::geometric::HybridASTAR planner(ss.getSpaceInformation());
-        planner.setProblemDefinition(ss.getProblemDefinition());
-        ss.setPlanner(std::make_shared<ompl::geometric::HybridASTAR>(ss.getSpaceInformation()));
-
-        // 运行规划器（限定时间为30秒）
-        ss.setStartAndGoalStates(start, goal);
-        ompl::base::PlannerStatus status = ss.solve(30.0);
-
-        // 获取结果
-        if (status == ompl::base::PlannerStatus::EXACT_SOLUTION)
-        {
-            std::vector<geometry_msgs::PoseStamped> path;
-            ompl::geometric::PathGeometric geom_path = ss.getSolutionPath();
-            for (auto& state : geom_path.getStates())
-            {
-                auto se2state = state->as<ompl::base::SE2StateSpace::StateType>();
-                double x = se2state->getX();
-                double y = se2state->getY();
-                geometry_msgs::PoseStamped pose;
-                pose.pose.position.x = x;
-                pose.pose.position.y = y;
-                pose.pose.orientation.w = 1.0;
-                path.push_back(pose);
-            }
-            publishPath(path);
-        }
-        else
-        {
-            ROS_WARN("Failed to find a valid path.");
-        }
+        std::vector<Node> path = searchPath(start, goal);
+        path = smoothPath(path);
+        publishPath(path);
     }
 
-private:
-    ros::NodeHandle nh_;
-    ros::Subscriber map_sub_;
-    ros::Publisher path_pub_, marker_pub_;
-    std::vector<std::vector<int>> map_;  // 存储地图的二维数组
-    bool map_received_;  // 是否已接收到地图
-    double map_origin_x_;  // 地图原点x坐标
-    double map_origin_y_;  // 地图原点y坐标
-    double map_resolution_;  // 地图分辨率
-    int start_x_, start_y_;  // 起点坐标
-    int goal_x_, goal_y_;  // 终点坐标
+    // 定义节点比较函数，用于优先队列的排序
+    struct CompareNodes
+    {
+        bool operator()(const Node* a, const Node* b) const
+        { return a->f > b->f; }
+    };
 };
 
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "hybrid_astar_planner");
+
     HybridAstarPlanner planner;
-    ros::Rate rate(10.0);
 
-    while (ros::ok())
-    {
-        ros::spinOnce();
+    // 测试：规划一条路径
+    geometry_msgs::PoseStamped start_pose;
+    start_pose.header.frame_id = "map";
+    start_pose.pose.position.x = 1;
+    start_pose.pose.position.y = 1;
+    start_pose.pose.orientation.w = 1;
 
-        // 生成路径
-        planner.generatePlan();
+    geometry_msgs::PoseStamped goal_pose;
+    goal_pose.header.frame_id = "map";
+    goal_pose.pose.position.x = 18;
+    goal_pose.pose.position.y = 28;
+    goal_pose.pose.orientation.w = 1;
 
-        rate.sleep();
-    }
+    planner.run(start_pose, goal_pose);
+
+    ros::spin();
 
     return 0;
 }
-
