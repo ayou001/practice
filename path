@@ -185,3 +185,203 @@ int main(int argc, char** argv) {
 
     return 0;
 }
+
+..........
+#include <ros/ros.h>
+#include <nav_msgs/OccupancyGrid.h>
+#include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <visualization_msgs/Marker.h>
+
+// OMPL库
+#include <ompl/base/spaces/SE2StateSpace.h>
+#include <ompl/geometric/SimpleSetup.h>
+#include <ompl/geometric/planners/prm/PRM.h>
+#include <ompl/geometric/planners/hybridHybridASTAR.h>
+
+class HybridAstarPlanner
+{
+public:
+    HybridAstarPlanner() : map_received_(false), nh_("~")
+    {
+        // 订阅地图信息
+        map_sub_ = nh_.subscribe("map", 1, &HybridAstarPlanner::mapCallback, this);
+
+        // 发布路径和可视化Marker
+        path_pub_ = nh_.advertise<nav_msgs::Path>("path", 1);
+        marker_pub_ = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
+
+        // 读取起点和终点坐标
+        nh_.param<int>("start_x", start_x_, 0);
+        nh_.param<int>("start_y", start_y_, 0);
+        nh_.param<int>("goal_x", goal_x_, 0);
+        nh_.param<int>("goal_y", goal_y_, 0);
+    }
+
+    // 地图回调函数
+    void mapCallback(const nav_msgs::OccupancyGridConstPtr& msg)
+    {
+        // 将地图存储为二维数组
+        map_.resize(msg->info.width, std::vector<int>(msg->info.height, 0));
+        for (int x = 0; x < msg->info.width; x++)
+        {
+            for (int y = 0; y < msg->info.height; y++)
+            {
+                int i = y * msg->info.width + x;
+                if (msg->data[i] >= 50)  // 障碍物
+                    map_[x][y] = 1;
+                else
+                    map_[x][y] = 0;
+            }
+        }
+
+        map_origin_x_ = msg->info.origin.position.x;
+        map_origin_y_ = msg->info.origin.position.y;
+        map_resolution_ = msg->info.resolution;
+
+        map_received_ = true;
+    }
+
+    // 检查状态是否有效（即是否在自由空间内）
+    bool isStateValid(const ompl::base::State* state) const
+    {
+        double xy[2];
+        auto se2state = state->as<ompl::base::SE2StateSpace::StateType>();
+        double x = se2state->getX() / map_resolution_ + map_origin_x_;
+        double y = se2state->getY() / map_resolution_ + map_origin_y_;
+        return isValid(x, y);
+    }
+
+    // 检查坐标是否在自由空间内
+    bool isValid(int x, int y) const
+    {
+        if (x < 0 || x >= map_.size() || y < 0 || y >= map_[0].size())
+            return false;
+        return map_[x][y] == 0;
+    }
+
+    // 发布路径和可视化Marker
+    void publishPath(std::vector<geometry_msgs::PoseStamped>& path)
+    {
+        nav_msgs::Path path_msg;
+        path_msg.header.stamp = ros::Time::now();
+        path_msg.header.frame_id = "map";
+        for (auto& pose : path)
+        {
+            path_msg.poses.push_back(pose);
+        }
+        path_pub_.publish(path_msg);
+
+        // 可视化路径的Marker
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = "map";
+        marker.header.stamp = ros::Time::now();
+        marker.ns = "path";
+        marker.id = 0;
+        marker.type = visualization_msgs::Marker::LINE_STRIP;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = 0.1;
+        marker.color.r = 1.0;
+        marker.color.a = 1.0;
+        for (auto& pose : path)
+        {
+            marker.points.push_back(pose.pose.position);
+        }
+        marker_pub_.publish(marker);
+    }
+
+    void generatePlan()
+    {
+        if (!map_received_)
+        {
+            ROS_WARN("Map has not been received yet. Unable to plan.");
+            return;
+        }
+
+        // 创建状态空间
+        auto space(std::make_shared<ompl::base::SE2StateSpace>());
+        ompl::base::RealVectorBounds bounds(2);
+        bounds.setLow(0);
+        bounds.high[0] = map_.size() * map_resolution_;
+        bounds.high[1] = map_[0].size() * map_resolution_;
+        space->setBounds(bounds);
+
+        // 设置起点和终点
+        ompl::base::ScopedState<> start(space), goal(space);
+        start[0] = start_x_ * map_resolution_ + map_origin_x_;
+        start[1] = start_y_ * map_resolution_ + map_origin_y_;
+        goal[0] = goal_x_ * map_resolution_ + map_origin_x_;
+        goal[1] = goal_y_ * map_resolution_ + map_origin_y_;
+
+        // 创建SimpleSetup
+        ompl::geometric::SimpleSetup ss(space);
+
+        // 设置验证器（检查状态是否有效）
+        ss.setStateValidityChecker(std::bind(&HybridAstarPlanner::isStateValid, this, std::placeholders::_1));
+
+        // 创建规划器（这里使用Hybrid A*）
+        ompl::geometric::HybridASTAR planner(ss.getSpaceInformation());
+        planner.setProblemDefinition(ss.getProblemDefinition());
+        ss.setPlanner(std::make_shared<ompl::geometric::HybridASTAR>(ss.getSpaceInformation()));
+
+        // 运行规划器（限定时间为30秒）
+        ss.setStartAndGoalStates(start, goal);
+        ompl::base::PlannerStatus status = ss.solve(30.0);
+
+        // 获取结果
+        if (status == ompl::base::PlannerStatus::EXACT_SOLUTION)
+        {
+            std::vector<geometry_msgs::PoseStamped> path;
+            ompl::geometric::PathGeometric geom_path = ss.getSolutionPath();
+            for (auto& state : geom_path.getStates())
+            {
+                auto se2state = state->as<ompl::base::SE2StateSpace::StateType>();
+                double x = se2state->getX();
+                double y = se2state->getY();
+                geometry_msgs::PoseStamped pose;
+                pose.pose.position.x = x;
+                pose.pose.position.y = y;
+                pose.pose.orientation.w = 1.0;
+                path.push_back(pose);
+            }
+            publishPath(path);
+        }
+        else
+        {
+            ROS_WARN("Failed to find a valid path.");
+        }
+    }
+
+private:
+    ros::NodeHandle nh_;
+    ros::Subscriber map_sub_;
+    ros::Publisher path_pub_, marker_pub_;
+    std::vector<std::vector<int>> map_;  // 存储地图的二维数组
+    bool map_received_;  // 是否已接收到地图
+    double map_origin_x_;  // 地图原点x坐标
+    double map_origin_y_;  // 地图原点y坐标
+    double map_resolution_;  // 地图分辨率
+    int start_x_, start_y_;  // 起点坐标
+    int goal_x_, goal_y_;  // 终点坐标
+};
+
+int main(int argc, char** argv)
+{
+    ros::init(argc, argv, "hybrid_astar_planner");
+    HybridAstarPlanner planner;
+    ros::Rate rate(10.0);
+
+    while (ros::ok())
+    {
+        ros::spinOnce();
+
+        // 生成路径
+        planner.generatePlan();
+
+        rate.sleep();
+    }
+
+    return 0;
+}
+
