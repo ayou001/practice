@@ -1,327 +1,14 @@
-#include <ros/ros.h>
-#include <nav_msgs/OccupancyGrid.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <tf/transform_datatypes.h>
-#include <iostream>
-#include <vector>
-#include <cmath>
-#include <queue>
-#include <algorithm>
 
-// 定义节点类，用于存储搜索过程中的节点信息
-class Node
-{
-public:
-    int x;
-    int y;
-    double g;  // 节点到起点的代价
-    double f;  // 估计代价函数值：f=g+h
-    Node* parent;
-
-    Node(int x_, int y_, double g_, Node* parent_)
-        :x(x_), y(y_), g(g_), f(0), parent(parent_)
-    {}
-
-    // 定义启发函数heuristic：计算该节点到终点的曼哈顿距离
-    static double heuristic(const Node* a, const Node* b)
-    {
-        // 曼哈顿距离=横向距离+纵向距离
-        return std::abs(a->x - b->x) + std::abs(a->y - b->y);
-    }
-};
-
-// 定义Hybrid A*路径规划器类
-class HybridAstarPlanner
-{
-private:
-    ros::NodeHandle nh_;
-    ros::Subscriber map_sub_;
-    ros::Publisher path_pub_;
-    const double resolution_;
-    const int map_origin_x_;
-    const int map_origin_y_;
-    std::vector<int8_t> map_data_;
-    int map_width_;
-    int map_height_;
-    // 定义地图尺寸和障碍物坐标
-    const int map_size_x_;
-    const int map_size_y_;
-    std::vector<std::pair<int, int>> obstacles_;
-
-public:
-    HybridAstarPlanner()
-        :resolution_(0.1), map_origin_x_(-10), map_origin_y_(-15),
-         map_size_x_(20), map_size_y_(30),
-         obstacles_{{2,5},{3,5},{4,5},{5,5},{6,5},{7,5},{8,5},
-                    {12,15},{13,15},{14,15},{15,15}}
-    {
-        // 订阅地图信息
-        map_sub_ = nh_.subscribe("/map", 1, &HybridAstarPlanner::mapCallback, this);
-        // 发布路径信息
-        path_pub_ = nh_.advertise<nav_msgs::Path>("path", 1);
-    }
-
-    // 地图回调函数，将地图信息存储到map_data_中
-    void mapCallback(const nav_msgs::OccupancyGrid& msg)
-    {
-        map_width_ = msg.info.width;
-        map_height_ = msg.info.height;
-        map_data_ = msg.data;
-    }
-
-    // 检查是否越界或者障碍物
-    bool isValid(const int x, const int y) const
-    {
-        if (x < 0 || x >= map_width_ || y < 0 || y >= map_height_) return false;
-        if (map_data_[y * map_width_ + x] != 0) return false;
-        for (auto& obstacle : obstacles_)
-        {
-            if (x == obstacle.first && y == obstacle.second) return false;
-        }
-        return true;
-    }
-
-    // 使用A*算法从起点搜索到终点，返回路径
-    std::vector<Node> searchPath(const Node& start, const Node& goal) const
-    {
-        std::vector<Node> path;
-        std::vector<Node*> closed_set;
-        std::priority_queue<Node*, std::vector<Node*>, CompareNodes> open_set;
-
-        // 将起点加入open_set中
-        open_set.push(new Node(start.x, start.y, 0, nullptr));
-
-        // 循环搜索直到open_set为空
-        while (!open_set.empty())
-        {
-            Node* current = open_set.top();
-            open_set.pop();
-            closed_set.push_back(current);
-
-            if (current->x == goal.x && current->y == goal.y)  // 终点节点
-            {
-                // 反向遍历节点，得到路径
-                while (current)
-                {
-                    path.push_back(*current);
-                    current = current->parent;
-                }
-                std::reverse(path.begin(), path.end());
-
-                // 清空open_set和closed_set
-                while (!open_set.empty())
-                {
-                    delete open_set.top();
-                    open_set.pop();
-                }
-                for (auto& node : closed_set)
-                {
-                    delete node;
-                }
-                closed_set.clear();
-
-                return path;
-            }
-
-            // 扩展当前节点周围的四个节点
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                for (int dy = -1; dy <= 1; dy++)
-                {
-                    if (dx == 0 && dy == 0) continue;
-                    int x = current->x + dx;
-                    int y = current->y + dy;
-
-                    // 检查是否越界或者障碍物
-                    if (!isValid(x, y)) continue;
-
-                    // 计算该节点到起点的代价和估计代价
-                    double g = current->g + std::sqrt(dx * dx + dy * dy);
-                    double f = g + Node::heuristic(new Node(x, y, 0, nullptr), &goal);
-
-                    // 如果该节点已经在closed_set中，则跳过
-                    bool in_closed_set = false;
-                    for (auto& node : closed_set)
-                    {
-                        if (node->x == x && node->y == y)
-                        {
-                            in_closed_set = true;
-                            break;
-                        }
-                    }
-                    if (in_closed_set) continue;
-
-                    // 将该节点加入open_set中
-                    bool in_open_set = false;
-                    Node* node_ptr = nullptr;
-                    for (auto& node : open_set)
-                    {
-                        if (node->x == x && node->y == y)
-                        {
-                            in_open_set = true;
-                            node_ptr = node;
-                            break;
-                        }
-                    }
-                    if (!in_open_set)
-                    {
-                        node_ptr = new Node(x, y, g, current);
-                        open_set.push(node_ptr);
-                    }
-                    else if (g < node_ptr->g)
-                    {
-                        node_ptr->g = g;
-                        node_ptr->f = g + Node::heuristic(node_ptr, &goal);
-                        node_ptr->parent = current;
-                    }
-                }
-            }
-        }
-
-        // 清空open_set和closed_set
-        while (!open_set.empty())
-        {
-            delete open_set.top();
-            open_set.pop();
-        }
-        for (auto& node : closed_set)
-        {
-            delete node;
-        }
-        closed_set.clear();
-
-        return path;
-    }
-
-    // 使用贪心算法对路径进行光滑化处理
-    std::vector<Node> smoothPath(const std::vector<Node>& path) const
-    {
-        if (path.size() <= 2) return path;
-
-        std::vector<Node> new_path;
-        new_path.push_back(path[0]);
-        for (size_t i = 1; i < path.size() - 1; i++)
-        {
-            const Node& prev = path[i-1];
-            const Node& curr = path[i];
-            const Node& next = path[i+1];
-
-            double prev_to_curr = std::sqrt(std::pow(prev.x-curr.x, 2) + std::pow(prev.y-curr.y, 2));
-            double curr_to_next = std::sqrt(std::pow(curr.x-next.x, 2) + std::pow(curr.y-next.y, 2));
-            double prev_to_next = std::sqrt(std::pow(prev.x-next.x, 2) + std::pow(prev.y-next.y, 2));
-
-            // 检查是否三个节点共线
-            if (prev_to_curr + curr_to_next == prev_to_next)
-            {
-                continue;
-            }
-
-                        double x1 = curr.x + (prev.x - curr.x) * curr_to_next / prev_to_curr;
-            double y1 = curr.y + (prev.y - curr.y) * curr_to_next / prev_to_curr;
-            double x2 = curr.x + (next.x - curr.x) * curr_to_next / prev_to_next;
-            double y2 = curr.y + (next.y - curr.y) * curr_to_next / prev_to_next;
-
-            // 计算夹角
-            double angle = std::atan2(y2 - y1, x2 - x1);
-
-            // 在curr和next之间插入一个新节点
-            new_path.push_back(Node(static_cast<int>(std::round(x1)), static_cast<int>(std::round(y1)), 0, nullptr));
-            new_path.back().parent = &new_path[new_path.size()-2];
-            new_path.push_back(Node(static_cast<int>(std::round(x2)), static_cast<int>(std::round(y2)), 0, nullptr));
-            new_path.back().parent = &new_path[new_path.size()-2];
-            new_path.back().f = Node::heuristic(&new_path.back(), &new_path.front()) + new_path.back().g;
-            new_path.back().f += angle * angle;  // 加上夹角作为代价，用于凸优化
-
-            new_path.push_back(curr);
-        }
-        new_path.push_back(path.back());
-
-        return new_path;
-    }
-
-    // 将路径中的节点转换成实际坐标值
-    std::vector<geometry_msgs::PoseStamped> convertPathToPoses(const std::vector<Node>& path) const
-    {
-        std::vector<geometry_msgs::PoseStamped> poses;
-        for (const auto& node : path)
-        {
-            geometry_msgs::PoseStamped pose;
-            pose.pose.position.x = node.x * resolution_ + map_origin_x_;
-            pose.pose.position.y = node.y * resolution_ + map_origin_y_;
-            pose.pose.orientation = tf::createQuaternionMsgFromYaw(0);
-            poses.push_back(pose);
-        }
-        return poses;
-    }
-
-    // 发布路径信息
-    void publishPath(const std::vector<Node>& path) const
-    {
-        nav_msgs::Path path_msg;
-        path_msg.header.stamp = ros::Time::now();
-        path_msg.header.frame_id = "map";
-        path_msg.poses = convertPathToPoses(path);
-        path_pub_.publish(path_msg);
-    }
-
-    // 执行Hybrid A*路径规划
-    void run(const geometry_msgs::PoseStamped& start_pose, const geometry_msgs::PoseStamped& goal_pose)
-    {
-        Node start(static_cast<int>((start_pose.pose.position.x - map_origin_x_) / resolution_),
-                   static_cast<int>((start_pose.pose.position.y - map_origin_y_) / resolution_),
-                   0.0, nullptr);
-
-        Node goal(static_cast<int>((goal_pose.pose.position.x - map_origin_x_) / resolution_),
-                  static_cast<int>((goal_pose.pose.position.y - map_origin_y_) / resolution_),
-                  0.0, nullptr);
-
-        std::vector<Node> path = searchPath(start, goal);
-        path = smoothPath(path);
-        publishPath(path);
-    }
-
-    // 定义节点比较函数，用于优先队列的排序
-    struct CompareNodes
-    {
-        bool operator()(const Node* a, const Node* b) const
-        { return a->f > b->f; }
-    };
-};
-
-int main(int argc, char** argv)
-{
-    ros::init(argc, argv, "hybrid_astar_planner");
-
-    HybridAstarPlanner planner;
-
-    // 测试：规划一条路径
-    geometry_msgs::PoseStamped start_pose;
-    start_pose.header.frame_id = "map";
-    start_pose.pose.position.x = 1;
-    start_pose.pose.position.y = 1;
-    start_pose.pose.orientation.w = 1;
-
-    geometry_msgs::PoseStamped goal_pose;
-    goal_pose.header.frame_id = "map";
-    goal_pose.pose.position.x = 18;
-    goal_pose.pose.position.y = 28;
-    goal_pose.pose.orientation.w = 1;
-
-    planner.run(start_pose, goal_pose);
-
-    ros::spin();
-
-    return 0;
-}
-
-
-
-/////////////////////
-
+/*
 #include <ros/ros.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/PoseStamped.h>
+
+const int Start_x=1;
+const int Start_y=1;
+const int end_x=10;
+const int end_y=10;
 
 // 定义节点结构体
 struct Node {
@@ -364,16 +51,8 @@ bool is_valid_node(int x, int y) {
 // A*算法寻找最优路径并返回其节点指针，如果没有可行路径则返回空指针
 Node* find_path() {
     // 创建起始节点和结束节点
-    Node* start_node = new Node{int(start_pose.pose.position.x / map_msg->info.resolution),
-                                 int(start_pose.pose.position.y / map_msg->info.resolution),
-                                 0.0f,
-                                 0.0f,
-                                 nullptr};
-    Node* end_node = new Node{int(end_pose.pose.position.x / map_msg->info.resolution),
-                               int(end_pose.pose.position.y / map_msg->info.resolution),
-                               0.0f,
-                               0.0f,
-                               nullptr};
+    Node* start_node = new Node{90,90,0.0f,0.0f,nullptr};
+    Node* end_node = new Node{1135,455,0.0f,0.0f,nullptr};
 
     // 创建开放列表和关闭列表
     std::vector<Node*> open_list;
@@ -381,6 +60,222 @@ Node* find_path() {
 
     // 初始化起始节点的 f 值，并添加到开放列表中
     start_node->f = manhattan_distance(start_node->x, start_node->y, end_node->x, end_node->y);
+
+    open_list.push_back(start_node);
+
+    while (!open_list.empty()) {
+        // 从开放列表中选取 f 值最小的节点，并将其加入到关闭列表中
+        Node* current_node = open_list.front();
+        std::cout<<current_node->f<<std::endl;
+        for (auto node : open_list) {
+            if (node->f < current_node->f) {
+                current_node = node;
+            }
+        }
+        open_list.erase(std::find(open_list.begin(), open_list.end(), current_node));
+        close_list.push_back(current_node);
+
+        // 判断当前节点是否为目标节点
+        if (*current_node == *end_node) {
+            return current_node;
+        }
+
+        // 在当前节点周围搜索可行节点
+        for (int i = -1; i <= 1; ++i) {
+            for (int j = -1; j <= 1; ++j) {
+                if (i == 0 && j == 0) {
+                    continue;
+                }
+
+                int x = current_node->x + i;
+                int y = current_node->y + j;
+
+                // 判断该节点是否在地图内且可行
+                if (!is_valid_node(x, y)) {
+                    continue;
+                }
+                std::cout<<"shifouzaiguanbiliebiao\n";
+                // 判断该节点是否在关闭列表中
+                Node temp_node{x, y, 0.0f, 0.0f, nullptr};
+                auto it = std::find(close_list.begin(), close_list.end(), &temp_node);
+                if (it != close_list.end()) {
+                    continue;
+                }
+
+                // 计算该节点的 g 值
+                float g = current_node->g + manhattan_distance(current_node->x, current_node->y, x, y);
+
+                // 如果该节点不在开放列表中，则添加进去
+                it = std::find(open_list.begin(), open_list.end(), &temp_node);
+                if (it == open_list.end()) {
+                    Node* new_node = new Node{x, y, g, 0.0f, current_node};
+                    printf("x:%d y:%d\n",new_node->x,new_node->y);
+                    new_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
+                    open_list.push_back(new_node);
+                } else {
+                    // 如果该节点已经在开放列表中且新的 g 值更优，则更新其 g 和 f 值，并修改其父节点
+                    Node* existing_node = *it;
+                    if (g < existing_node->g) {
+                        printf("change:x:%d y:%d\n",existing_node->x,existing_node->y);
+                        existing_node->g = g;
+                        existing_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
+                        existing_node->parent = current_node;
+                    }
+                }
+            }
+        }
+    }
+
+    // 如果没有可行路径，则返回空指针
+    return nullptr;
+}
+
+
+
+
+// 发布路径消息
+void publish_path(const Node* end_node) {
+    // 创建路径消息
+    nav_msgs::Path path_msg;
+    path_msg.header.stamp = ros::Time::now();
+    path_msg.header.frame_id = map_msg->header.frame_id;
+
+    // 从目标节点回溯到起始节点，构建路径消息
+    const Node* current_node = end_node;
+    while (current_node) {
+        float x = current_node->x * map_msg->info.resolution + map_msg->info.resolution / 2;
+        float y = current_node->y * map_msg->info.resolution + map_msg->info.resolution / 2;
+
+        geometry_msgs::PoseStamped pose;
+        pose.pose.position.x = x;
+        pose.pose.position.y = y;
+        pose.pose.position.z = 0.0f;
+        path_msg.poses.push_back(pose);
+
+        current_node = current_node->parent;
+    }
+
+    // 反转路径消息，使其从起始节点到目标节点
+    std::reverse(path_msg.poses.begin(), path_msg.poses.end());
+
+    // 发布路径消息
+    path_pub.publish(path_msg);
+}
+
+
+
+// 地图回调函数
+void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
+    // 保存地图消息
+    map_msg = msg;
+
+    while (ros::ok()) {
+
+
+        // 寻找最优路径
+        Node* end_node = find_path();
+
+        if (end_node) {
+            // 发布路径消息
+            publish_path(end_node);
+
+            // 释放节点内存
+            while (end_node) {
+                Node* temp_node = end_node->parent;
+                delete end_node;
+                end_node = temp_node;
+            }
+        } else {
+            ROS_WARN("Failed to find path.");
+        }
+
+        break;
+    }
+}
+
+// 主函数
+int main(int argc, char** argv) {
+    // 初始化ROS节点
+    ros::init(argc, argv, "path_planning_node");
+    ros::NodeHandle nh;
+
+    // 创建地图和路径发布器
+    ros::Subscriber map_sub = nh.subscribe("visualized_map", 1, &map_callback);
+    path_pub = nh.advertise<nav_msgs::Path>("path", 1);
+
+
+
+    while(ros::ok())
+    {      
+        ros::spinOnce();
+    
+    }
+    return 0;
+}
+*/
+
+#include <ros/ros.h>
+#include <nav_msgs/OccupancyGrid.h>
+#include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
+
+const int Start_x = 80;
+const int Start_y = 80;
+const int end_x = 1130;
+const int end_y = 450;
+
+// 定义节点结构体
+struct Node {
+    int x;
+    int y;
+    float g;
+    float f;
+    Node* parent;
+
+    bool operator==(const Node& other) const {
+        return x == other.x && y == other.y;
+    }
+};
+
+// 定义全局变量
+nav_msgs::OccupancyGrid::ConstPtr map_msg;
+ros::Publisher path_pub;
+
+// 计算两个节点之间的曼哈顿距离
+float manhattan_distance(int x1, int y1, int x2, int y2) {
+    return abs(x1 - x2) + abs(y1 - y2);
+}
+
+// 判断一个节点是否在地图内且可行
+bool is_valid_node(int x, int y) {
+    if (x < 0 || x >= map_msg->info.width || y < 0 || y >= map_msg->info.height) {
+        return false;
+    }
+
+    int index = y * map_msg->info.width + x;
+    if (map_msg->data[index] == 100) { 
+        return false;
+    }
+
+    return true;
+}
+
+// A*算法寻找最优路径并返回其节点指针，如果没有可行路径则返回空指针
+Node* find_path() {
+    // 创建起始节点和结束节点
+    Node* start_node = new Node{Start_x, Start_y, 0.0f, 0.0f, nullptr};
+
+    Node* end_node = new Node{end_x, end_y, 0.0f, 0.0f, nullptr};
+    int ind=Start_y*map_msg->info.width+Start_x;
+    std::cout<<"start_x: "<<Start_x<<" start_y: "<<Start_y<<" ind: "<<ind<<" start_data :"<<map_msg->data[ind]<<std::endl;
+
+    // 创建开放列表和关闭列表
+    std::vector<Node*> open_list;
+    std::vector<Node*> close_list;
+
+    // 初始化起始节点的 f 值，并添加到开放列表中
+    start_node->f = manhattan_distance(start_node->x, start_node->y, end_node->x, end_node->y);
+
     open_list.push_back(start_node);
 
     while (!open_list.empty()) {
@@ -423,17 +318,18 @@ Node* find_path() {
 
                 // 计算该节点的 g 值
                 float g = current_node->g + manhattan_distance(current_node->x, current_node->y, x, y);
-
+                std::cout<<"x:"<<current_node->x<<"  y:"<<current_node->y<<"  g"<<current_node->g<<std::endl;
                 // 如果该节点不在开放列表中，则添加进去
                 it = std::find(open_list.begin(), open_list.end(), &temp_node);
                 if (it == open_list.end()) {
                     Node* new_node = new Node{x, y, g, 0.0f, current_node};
+                    printf("x:%d y:%d\n",new_node->x,new_node->y);
                     new_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
                     open_list.push_back(new_node);
                 } else {
-                    // 如果该节点已经在开放列表中且新的 g 值更优，则更新其 g 和 f 值，并修改其父节点
+                    // 如果该节点已经在开放列表中且新的 f 值更优，则更新其 g 和 f 值，并修改其父节点
                     Node* existing_node = *it;
-                    if (g < existing_node->g) {
+                    if (g + manhattan_distance(x, y, end_node->x, end_node->y) < existing_node->f) {
                         existing_node->g = g;
                         existing_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
                         existing_node->parent = current_node;
@@ -476,42 +372,11 @@ void publish_path(const Node* end_node) {
     path_pub.publish(path_msg);
 }
 
-// 尝试获取起始和目标姿态
-void try_get_poses() {
-    // TODO: 尝试获取起始和目标姿态
-}
-
-// 主函数
-int main(int argc, char** argv) {
-    // 初始化ROS节点
-    ros::init(argc, argv, "path_planning_node");
-    ros::NodeHandle nh;
-
-    // 创建地图和路径发布器
-    ros::Subscriber map_sub = nh.subscribe("map", 1, &map_callback);
-    path_pub = nh.advertise<nav_msgs::Path>("path", 1);
-
-    // 尝试获取起始和目标姿态
-    try_get_poses();
-
-    // 循环等待
-    ros::spin();
-
-    return 0;
-}
-
 // 地图回调函数
 void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
     // 保存地图消息
     map_msg = msg;
 
-    while (ros::ok()) {
-        // 如果尚未获取到起始或目标姿态，则继续尝试获取
-        if (start_pose.pose.position.x == 0.0f && start_pose.pose.position.y == 0.0f &&
-                end_pose.pose.position.x == 0.0f && end_pose.pose.position.y == 0.0f) {
-            try_get_poses();
-            continue;
-        }
 
         // 寻找最优路径
         Node* end_node = find_path();
@@ -530,26 +395,22 @@ void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
             ROS_WARN("Failed to find path.");
         }
 
-        break;
-    }
+   
+    
 }
 
-// 尝试获取起始和目标姿态
-void try_get_poses() {
-    // 尝试获取起始姿态
-    geometry_msgs::PoseStamped::ConstPtr start_pose_msg =
-        ros::topic::waitForMessage<geometry_msgs::PoseStamped>("start_pose", ros::Duration(1.0));
-    if (start_pose_msg) {
-        start_pose = *start_pose_msg;
-        ROS_INFO_STREAM("Got start pose: " << start_pose.pose.position.x << ", " << start_pose.pose.position.y);
-    }
+// 主函数
+int main(int argc, char** argv) {
+    // 初始化ROS节点
+    ros::init(argc, argv, "path_planning_node");
+    ros::NodeHandle nh;
 
-    // 尝试获取目标姿态
-    geometry_msgs::PoseStamped::ConstPtr end_pose_msg =
-        ros::topic::waitForMessage<geometry_msgs::PoseStamped>("end_pose", ros::Duration(1.0));
-    if (end_pose_msg) {
-        end_pose = *end_pose_msg;
-        ROS_INFO_STREAM("Got end pose: " << end_pose.pose.position.x << ", " << end_pose.pose.position.y);
+    // 创建地图和路径发布器
+    ros::Subscriber map_sub = nh.subscribe("visualized_map", 1, &map_callback);
+    path_pub = nh.advertise<nav_msgs::Path>("path", 1);
+
+    while (ros::ok()){
+        ros::spin();
     }
+    return 0;
 }
-
