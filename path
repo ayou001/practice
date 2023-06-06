@@ -1,14 +1,13 @@
 
-/*
 #include <ros/ros.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/PoseStamped.h>
 
-const int Start_x=1;
-const int Start_y=1;
-const int end_x=10;
-const int end_y=10;
+const int Start_x = 80;
+const int Start_y = 80;
+const int end_x = 1130;
+const int end_y = 450;
 
 // 定义节点结构体
 struct Node {
@@ -25,8 +24,6 @@ struct Node {
 
 // 定义全局变量
 nav_msgs::OccupancyGrid::ConstPtr map_msg;
-geometry_msgs::PoseStamped start_pose;
-geometry_msgs::PoseStamped end_pose;
 ros::Publisher path_pub;
 
 // 计算两个节点之间的曼哈顿距离
@@ -41,12 +38,13 @@ bool is_valid_node(int x, int y) {
     }
 
     int index = y * map_msg->info.width + x;
-    if (map_msg->data[index] > 50) {
+    if (map_msg->data[index] > 50) { 
         return false;
     }
 
     return true;
 }
+
 bool node_in_open_list(const Node* node, const std::vector<Node*>& open_list) {
     for (const Node* n : open_list) {
         if (node->x == n->x && node->y == n->y) {
@@ -56,32 +54,47 @@ bool node_in_open_list(const Node* node, const std::vector<Node*>& open_list) {
     return false;
 }
 
-
 // A*算法寻找最优路径并返回其节点指针，如果没有可行路径则返回空指针
 Node* find_path() {
     // 创建起始节点和结束节点
-    Node* start_node = new Node{90,90,0.0f,0.0f,nullptr};
-    Node* end_node = new Node{1135,455,0.0f,0.0f,nullptr};
+    Node* start_node = new Node{Start_x, Start_y, 0.0f, 0.0f, nullptr};
 
+    Node* end_node = new Node{end_x, end_y, 0.0f, 0.0f, nullptr};
+    int ind=Start_y*map_msg->info.width+Start_x;
+    printf("data: %d",map_msg->data[ind]);
+    ros::Duration(10.0).sleep();
     // 创建开放列表和关闭列表
-    std::vector<Node*> open_list;
-    std::vector<Node*> close_list;
+    std::vector<Node*> open_list(360000);
+    std::vector<Node*> close_list(36000);
 
     // 初始化起始节点的 f 值，并添加到开放列表中
     start_node->f = manhattan_distance(start_node->x, start_node->y, end_node->x, end_node->y);
 
     open_list.push_back(start_node);
-
-    while (!open_list.empty()) {
+    int a=1,b=1,c=1,d=1;
+    while (!open_list.empty()&&ros::ok()) {
         // 从开放列表中选取 f 值最小的节点，并将其加入到关闭列表中
+        
         Node* current_node = open_list.front();
-        std::cout<<current_node->f<<std::endl;
-        for (auto node : open_list) {
+      
+        for (const auto node : open_list) {
             if (node->f < current_node->f) {
                 current_node = node;
+                printf("d:%d\n",d);
+                d++;
             }
         }
-        open_list.erase(std::find(open_list.begin(), open_list.end(), current_node));
+        printf("x:%d y:%d g:%f f:%f\n",current_node->x,current_node->y,current_node->g,current_node->f);
+        open_list.erase(std::remove_if(open_list.begin(), open_list.end(),[&](const auto node){return *node==*current_node;} ),open_list.end());
+       // open_list.erase(std::find(open_list.begin(), open_list.end(), current_node));
+        
+      /* auto it=std::find(open_list.begin(), open_list.end(), &current_node);
+        if(it!=open_list.end()){
+            open_list.erase(it);
+            printf("e:%d\n",e);
+            e++;
+        }
+        */
         close_list.push_back(current_node);
 
         // 判断当前节点是否为目标节点
@@ -103,32 +116,91 @@ Node* find_path() {
                 if (!is_valid_node(x, y)) {
                     continue;
                 }
-                std::cout<<"shifouzaiguanbiliebiao\n";
+
                 // 判断该节点是否在关闭列表中
+
                 Node temp_node{x, y, 0.0f, 0.0f, nullptr};
-                auto it = std::find(close_list.begin(), close_list.end(), &temp_node);
-                if (it != close_list.end()) {
+                bool in_close_list = false;
+            
+                for(const auto node:close_list){
+                    if(*node==temp_node){
+                        in_close_list=true;
+                        break;
+                    }
+                    
+                }
+               
+             //   auto it = std::find(close_list.begin(), close_list.end(), &temp_node);
+                // if (it != close_list.end()) {
+                //     printf("c:%d\n",c);
+                //     c++;
+                //     continue;
+                // }
+                if(in_close_list){
+                    printf("c:%d\n",c);
+                    c++;
                     continue;
                 }
-
                 // 计算该节点的 g 值
+                
                 float g = current_node->g + manhattan_distance(current_node->x, current_node->y, x, y);
-
+                float h = manhattan_distance(x, y, end_node->x, end_node->y);
+                //std::cout<<"x:"<<current_node->x<<"  y:"<<current_node->y<<"  g"<<current_node->g<<std::endl;
                 // 如果该节点不在开放列表中，则添加进去
-                it = std::find(open_list.begin(), open_list.end(), &temp_node);
-                if (it == open_list.end()) {
-                    Node* new_node = new Node{x, y, g, 0.0f, current_node};
-                    printf("x:%d y:%d\n",new_node->x,new_node->y);
-                    new_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
-                    open_list.push_back(new_node);
+                
+            //    it = std::find(open_list.begin(), open_list.end(), &temp_node);
+
+
+                // if (it == open_list.end()) {
+                //     Node* new_node = new Node{x, y, g, 0.0f, current_node};
+                //     printf("a:%d\n",a);
+                //     a++; 
+                //     new_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
+                //     open_list.push_back(new_node);
+                // } else {
+                //     // 如果该节点已经在开放列表中且新的 f 值更优，则更新其 g 和 f 值，并修改其父节点
+                //     Node* existing_node = *it;
+                //     if (g + manhattan_distance(x, y, end_node->x, end_node->y) < existing_node->f) {
+                //         printf("b:%d\n",b);
+                //         b++; 
+                //         existing_node->g = g;
+                //         existing_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
+                //         existing_node->parent = current_node;
+                //     }
+                // }
+                bool in_open_list=false;
+                for(auto node:open_list){
+                    if(*node==temp_node){
+                        in_open_list=true;
+                        break;
+                    }
+                }
+
+                if (!in_open_list) {
+                   
+                        Node* new_node = new Node{x, y, g, 0.0f, current_node};
+                        printf("a:%d\n",a);
+                        a++; 
+                        new_node->f = g + h;
+                        open_list.push_back(new_node);
+
+                    
+
                 } else {
-                    // 如果该节点已经在开放列表中且新的 g 值更优，则更新其 g 和 f 值，并修改其父节点
-                    Node* existing_node = *it;
-                    if (g < existing_node->g) {
-                        printf("change:x:%d y:%d\n",existing_node->x,existing_node->y);
-                        existing_node->g = g;
-                        existing_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
-                        existing_node->parent = current_node;
+                    // 如果该节点已经在开放列表中且新的 f 值更优，则更新其 g 和 f 值，并修改其父节点
+                    printf("b:%d\n",b);
+                    b++; 
+                    for(const auto existing_node:open_list){
+                        if(*existing_node==temp_node){                  
+                            if (g + h < existing_node->f) {
+                                printf("b:%d\n",b);
+                                b++; 
+                                existing_node->g = g;
+                                existing_node->f = g + h;
+                                existing_node->parent = current_node;
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -138,6 +210,79 @@ Node* find_path() {
     // 如果没有可行路径，则返回空指针
     return nullptr;
 }
+
+// 发布路径消息
+void publish_path(const Node* end_node) {
+    // 创建路径消息
+    nav_msgs::Path path_msg;
+    path_msg.header.stamp = ros::Time::now();
+    path_msg.header.frame_id = map_msg->header.frame_id;
+
+    // 从目标节点回溯到起始节点，构建路径消息
+    const Node* current_node = end_node;
+    while (current_node) {
+        float x = current_node->x * map_msg->info.resolution + map_msg->info.resolution / 2;
+        float y = current_node->y * map_msg->info.resolution + map_msg->info.resolution / 2;
+
+        geometry_msgs::PoseStamped pose;
+        pose.pose.position.x = x;
+        pose.pose.position.y = y;
+        pose.pose.position.z = 0.0f;
+        path_msg.poses.push_back(pose);
+
+        current_node = current_node->parent;
+    }
+
+    // 反转路径消息，使其从起始节点到目标节点
+    std::reverse(path_msg.poses.begin(), path_msg.poses.end());
+
+    // 发布路径消息
+    path_pub.publish(path_msg);
+}
+
+// 地图回调函数
+void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
+    // 保存地图消息
+    map_msg = msg;
+
+
+        // 寻找最优路径
+        Node* end_node = find_path();
+
+        if (end_node) {
+            // 发布路径消息
+            publish_path(end_node);
+
+            // 释放节点内存
+            while (end_node) {
+                Node* temp_node = end_node->parent;
+                delete end_node;
+                end_node = temp_node;
+            }
+        } else {
+            ROS_WARN("Failed to find path.");
+        }
+
+   
+    
+}
+
+// 主函数
+int main(int argc, char** argv) {
+    // 初始化ROS节点
+    ros::init(argc, argv, "path_planning_node");
+    ros::NodeHandle nh;
+
+    // 创建地图和路径发布器
+    ros::Subscriber map_sub = nh.subscribe("visualized_map", 1, &map_callback);
+    path_pub = nh.advertise<nav_msgs::Path>("path", 1);
+
+    while (ros::ok()){
+        ros::spinOnce();
+    }
+    return 0;
+}
+
 
 
 
