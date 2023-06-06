@@ -47,6 +47,15 @@ bool is_valid_node(int x, int y) {
 
     return true;
 }
+bool node_in_open_list(const Node* node, const std::vector<Node*>& open_list) {
+    for (const Node* n : open_list) {
+        if (node->x == n->x && node->y == n->y) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 // A*算法寻找最优路径并返回其节点指针，如果没有可行路径则返回空指针
 Node* find_path() {
@@ -213,6 +222,21 @@ int main(int argc, char** argv) {
     return 0;
 }
 */
+// 如果该节点已经在开放列表中且新的 f 值更优，则更新其 g 和 f 值，并修改其父节点
+if (node_in_open_list(&temp_node, open_list)) {
+    Node* existing_node = *std::find_if(open_list.begin(), open_list.end(), [&](Node* n) {
+        return temp_node == *n;
+    });
+    if (g + manhattan_distance(x, y, end_node->x, end_node->y) < existing_node->f) {
+        existing_node->g = g;
+        existing_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
+        existing_node->parent = current_node;
+    }
+} else { // 如果该节点不在开放列表中，则添加进去
+    Node* new_node = new Node{x, y, g, 0.0f, current_node};
+    new_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
+    open_list.push_back(new_node);
+}
 
 #include <ros/ros.h>
 #include <nav_msgs/OccupancyGrid.h>
