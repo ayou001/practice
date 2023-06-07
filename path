@@ -147,27 +147,7 @@ Node* find_path() {
                 float h = manhattan_distance(x, y, end_node->x, end_node->y);
                 //std::cout<<"x:"<<current_node->x<<"  y:"<<current_node->y<<"  g"<<current_node->g<<std::endl;
                 // 如果该节点不在开放列表中，则添加进去
-                
-            //    it = std::find(open_list.begin(), open_list.end(), &temp_node);
-
-
-                // if (it == open_list.end()) {
-                //     Node* new_node = new Node{x, y, g, 0.0f, current_node};
-                //     printf("a:%d\n",a);
-                //     a++; 
-                //     new_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
-                //     open_list.push_back(new_node);
-                // } else {
-                //     // 如果该节点已经在开放列表中且新的 f 值更优，则更新其 g 和 f 值，并修改其父节点
-                //     Node* existing_node = *it;
-                //     if (g + manhattan_distance(x, y, end_node->x, end_node->y) < existing_node->f) {
-                //         printf("b:%d\n",b);
-                //         b++; 
-                //         existing_node->g = g;
-                //         existing_node->f = g + manhattan_distance(x, y, end_node->x, end_node->y);
-                //         existing_node->parent = current_node;
-                //     }
-                // }
+        
                 bool in_open_list=false;
                 for(auto node:open_list){
                     if(*node==temp_node){
