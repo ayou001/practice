@@ -1,0 +1,51 @@
+
+// 计算要到达目标节点所需的Dubins曲线
+void calc_dubins_curve(const Node& current_node, const Node& goal_node, float& radius, float& length, int& direction) {
+    // 计算中心圆弧的半径和长度
+    radius = 1.0f / std::abs(kMaxCurvature);
+    float dx = goal_node.x - current_node.x;
+    float dy = goal_node.y - current_node.y;
+    float theta = std::atan2(dy, dx);
+    float dtheta = theta - current_node.theta;
+
+    if (std::abs(dtheta) > M_PI) {
+        if (dtheta > 0) {
+            dtheta -= 2 * M_PI;
+        } else {
+            dtheta += 2 * M_PI;
+        }
+    }
+
+    if (dtheta * kMaxCurvature > 0) {
+        direction = 1;
+    } else {
+        direction = -1;
+    }
+
+    length = std::abs(radius * dtheta);
+
+    // 计算两个切线段的长度
+    float dx1 = radius * std::sin(current_node.theta + direction * M_PI / 2);
+    float dy1 = -radius * std::cos(current_node.theta + direction * M_PI / 2);
+    float dx2 = radius * std::sin(theta - direction * M_PI / 2);
+    float dy2 = -radius * std::cos(theta - direction * M_PI / 2);
+    float dxt = dx2 - dx1;
+    float dyt = dy2 - dy1;
+    float dt = std::sqrt(dxt * dxt + dyt * dyt);
+    length += dt;
+
+    // 如果曲率太大，则把路径分成多段，每段都是Dubins曲线，以保证轨迹可以被控制器执行
+    if (std::abs(kMaxCurvature) * length > 1.0f) {
+        length = 1.0f / std::abs(kMaxCurvature);
+        calc_dubins_curve(current_node, Node{current_node.x, current_node.y, 0, 0, theta, 0, nullptr}, radius, dt, direction);
+        length += dt;
+        calc_dubins_curve(Node{goal_node.x, goal_node.y, 0, 0, theta, 0, nullptr}, goal_node, radius, dt, direction);
+        length += dt;
+    }
+}
+
+// 计算节点的启发式代价估计值
+float heuristic_cost_estimate(const Node* node, const Node* end_node) {
+    float distance = dubins_distance(*node, *end_node);
+    return node->g + distance;
+}
