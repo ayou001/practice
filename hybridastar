@@ -49,3 +49,314 @@ float heuristic_cost_estimate(const Node* node, const Node* end_node) {
     float distance = dubins_distance(*node, *end_node);
     return node->g + distance;
 }
+-----------------------------------------------------------------------------------------------
+
+
+#include <ros/ros.h>
+#include <nav_msgs/OccupancyGrid.h>
+#include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <cmath>
+const int Start_x = 80;
+const int Start_y = 80;
+const int end_x = 1130;
+const int end_y = 450;
+
+// 定义节点结构体
+struct Node {
+    int x;
+    int y;
+    float g;
+    float f;
+    float theta;
+    float rho;
+    Node* parent;
+
+    bool operator==(const Node& other) const {
+        return x == other.x && y == other.y;
+    }
+};
+
+// 定义全局变量
+nav_msgs::OccupancyGrid::ConstPtr map_msg;
+ros::Publisher path_pub;
+
+const float kMaxCurvature=1.0f/2.2f;
+const float kTurningRadius=1.0f/kMaxCurvature;
+
+// 计算两个节点之间的曼哈顿距离
+float manhattan_distance(int x1, int y1, int x2, int y2) {
+    return abs(x1 - x2) + abs(y1 - y2);
+}
+
+float dubins_distance(const Node& n1,const Node& n2){
+    float dx=n2.x-n1.x;
+    float dy=n2.y-n1.y;
+    float dtheta=abs(n1.theta-n2.theta);
+    if(dtheta>M_PI){
+        dtheta = 2* M_PI-dtheta;
+    }
+    float L=sqrt(dx*dx+dy*dy+kTurningRadius*kTurningRadius*dtheta*dtheta);
+
+    return L;
+}
+
+
+// 计算要到达目标节点所需的Dubins曲线
+void calc_dubins_curve(const Node& current_node, const Node& goal_node, float& radius, float& length, int& direction) {
+    // 计算中心圆弧的半径和长度
+    radius = 1.0f / std::abs(kMaxCurvature);
+    float dx = goal_node.x - current_node.x;
+    float dy = goal_node.y - current_node.y;
+    float theta = std::atan2(dy, dx);
+    float dtheta = theta - current_node.theta;
+
+    if (std::abs(dtheta) > M_PI) {
+        if (dtheta > 0) {
+            dtheta -= 2 * M_PI;
+        } else {
+            dtheta += 2 * M_PI;
+        }
+    }
+
+    if (dtheta * kMaxCurvature > 0) {
+        direction = 1;
+    } else {
+        direction = -1;
+    }
+
+    length = std::abs(radius * dtheta);
+
+    // 计算两个切线段的长度
+    float dx1 = radius * std::sin(current_node.theta + direction * M_PI / 2);
+    float dy1 = -radius * std::cos(current_node.theta + direction * M_PI / 2);
+    float dx2 = radius * std::sin(theta - direction * M_PI / 2);
+    float dy2 = -radius * std::cos(theta - direction * M_PI / 2);
+    float dxt = dx2 - dx1;
+    float dyt = dy2 - dy1;
+    float dt = std::sqrt(dxt * dxt + dyt * dyt);
+    length += dt;
+
+    // 如果曲率太大，则把路径分成多段，每段都是Dubins曲线，以保证轨迹可以被控制器执行
+    if (std::abs(kMaxCurvature) * length > 1.0f) {
+        length = 1.0f / std::abs(kMaxCurvature);
+        calc_dubins_curve(current_node, Node{current_node.x, current_node.y, 0, 0, theta, 0, nullptr}, radius, dt, direction);
+        length += dt;
+        calc_dubins_curve(Node{goal_node.x, goal_node.y, 0, 0, theta, 0, nullptr}, goal_node, radius, dt, direction);
+        length += dt;
+    }
+}
+
+// 计算节点的启发式代价估计值
+float heuristic_cost_estimate(const Node* node, const Node* end_node) {
+    float distance = dubins_distance(*node, *end_node);
+    return node->g + distance;
+}
+
+// 判断一个节点是否在地图内且可行
+bool is_valid_node(int x, int y) {
+    if (x < 0 || x >= map_msg->info.width || y < 0 || y >= map_msg->info.height) {
+        return false;
+    }
+
+    int index = y * map_msg->info.width + x;
+    if (map_msg->data[index] > 50) { 
+        return false;
+    }
+
+    return true;
+}
+
+bool node_in_open_list(const Node* node, const std::vector<Node*>& open_list) {
+    for (const Node* n : open_list) {
+        if (node->x == n->x && node->y == n->y&&abs(node->theta-n->theta<M_PI/8)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A*算法寻找最优路径并返回其节点指针，如果没有可行路径则返回空指针
+Node* find_path() {
+    // 创建起始节点和结束节点
+    Node* start_node = new Node{Start_x, Start_y,0.0f, 0.0f, 0.0f,kTurningRadius,nullptr};
+    Node* end_node = new Node{end_x, end_y, 0.0f, 0.0f,0.0f,0.0f ,nullptr};
+
+    // 创建开放列表和关闭列表
+    std::vector<Node*> open_list;
+    std::vector<Node*> close_list;
+
+    // 初始化起始节点的 f 值，并添加到开放列表中
+    start_node->f = heuristic_cost_estimate(start_node, end_node);
+    open_list.push_back(start_node);
+    int a=1,b=1,c=1,d=1;
+    while (!open_list.empty()&&ros::ok()) {
+        // 从开放列表中选取 f 值最小的节点，并将其加入到关闭列表中
+        Node* current_node = open_list.front();
+      
+        for (const auto node : open_list) {
+            if (node->f < current_node->f) {
+                current_node = node;
+                printf("d:%d\n",d);
+                d++;
+            }
+        }
+        printf("x:%d y:%d g:%f f:%f\n",current_node->x,current_node->y,current_node->g,current_node->f);
+        open_list.erase(std::remove_if(open_list.begin(), open_list.end(),[&](const auto node){return *node==*current_node;} ),open_list.end());
+
+        close_list.push_back(current_node);
+
+        // 判断当前节点是否为目标节点
+        if (*current_node == *end_node) {
+            return current_node;
+        }
+
+        // 在当前节点周围搜索可行节点
+        for (int i = -1; i <= 1; ++i) {
+            for (int j = -1; j <= 1; ++j) {
+                if (i == 0 && j == 0) {
+                    continue;
+                }
+
+                int x = current_node->x + i;
+                int y = current_node->y + j;
+
+                // 判断该节点是否在地图内且可行
+                if (!is_valid_node(x, y)) {
+                    continue;
+                }
+
+                // 判断该节点是否在关闭列表中
+
+                Node temp_node{x, y, 0.0f, 0.0f, 0.0f,0.0f,nullptr};
+                Node *t_node=new Node{x, y, 0.0f, 0.0f, 0.0f,0.0f,current_node};
+                bool in_close_list = false;
+            
+                for(const auto node:close_list){
+                    if(*node==temp_node){
+                        in_close_list=true;
+                                           
+                        break;
+                    }
+                    
+                }
+               
+                if(in_close_list){
+                    printf("c:%d\n",c);
+                    c++;
+                    continue;
+                }
+
+                // 计算该节点的 g 值
+                
+                    
+                float distance=dubins_distance(*current_node,temp_node);
+
+                float g = current_node->g + distance;
+                float f =g + heuristic_cost_estimate(t_node,end_node);
+       
+                bool in_open_list=false;
+                for(auto node:open_list){
+                    // 如果该节点已经在开放列表中且新的 f 值更优，则更新其 g 和 f 值，并修改其父节点
+                    if(*node==temp_node){
+                        in_open_list=true;
+                        if (g  < node->g) {
+                            printf("b:%d\n",b);
+                            b++; 
+                            node->g = g;
+                            node->f = f;
+                            node->parent = current_node;                       
+                        }
+                      
+                        break;
+                    }
+                }
+                // 如果该节点不在开放列表中，则添加进去
+                if (!in_open_list) {   
+                    Node* new_node = new Node{x, y, g, 0.0f, 0.0f,0.0f,current_node};        
+                    printf("a:%d\n",a);
+                    a++; 
+                    new_node->f = f;
+                    
+                    open_list.push_back(new_node);
+                } 
+            }
+        }
+    }
+
+    // 如果没有可行路径，则返回空指针
+    return nullptr;
+}
+
+// 发布路径消息
+void publish_path(const Node* end_node) {
+    // 创建路径消息
+    nav_msgs::Path path_msg;
+    path_msg.header.stamp = ros::Time::now();
+    path_msg.header.frame_id = map_msg->header.frame_id;
+
+    // 从目标节点回溯到起始节点，构建路径消息
+    const Node* current_node = end_node;
+    while (current_node) {
+        float x = current_node->x * map_msg->info.resolution + map_msg->info.resolution / 2;
+        float y = current_node->y * map_msg->info.resolution + map_msg->info.resolution / 2;
+
+        geometry_msgs::PoseStamped pose;
+        pose.pose.position.x = x;
+        pose.pose.position.y = y;
+        pose.pose.orientation.z = std::sin(current_node->theta/2);
+        pose.pose.orientation.w = std::cos(current_node->theta/2);
+        path_msg.poses.push_back(pose);
+
+        current_node = current_node->parent;
+    }
+
+    // 反转路径消息，使其从起始节点到目标节点
+    std::reverse(path_msg.poses.begin(), path_msg.poses.end());
+
+    // 发布路径消息
+    path_pub.publish(path_msg);
+}
+
+// 地图回调函数
+void map_callback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
+    // 保存地图消息
+    map_msg = msg;
+
+    // 寻找最优路径
+    Node* end_node = find_path();
+
+    if (end_node) {
+        // 发布路径消息
+        publish_path(end_node);
+        // 释放节点内存
+        while (end_node) {
+            Node* temp_node = end_node->parent;
+            delete end_node;
+            end_node = temp_node;
+            }
+    } 
+    else {
+        ROS_WARN("Failed to find path.");
+    }
+    
+}
+
+// 主函数
+int main(int argc, char** argv) {
+    // 初始化ROS节点
+    ros::init(argc, argv, "path_planning_node");
+    ros::NodeHandle nh;
+
+    // 创建地图和路径发布器
+    ros::Subscriber map_sub = nh.subscribe("visualized_map", 1, &map_callback);
+    path_pub = nh.advertise<nav_msgs::Path>("path", 1);
+
+    while (ros::ok()){
+        ros::spinOnce();
+    }
+    return 0;
+}
+
+
+
